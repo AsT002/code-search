@@ -6,7 +6,9 @@
 
 namespace {
 
-void printUsage(std::ostream& out) { out << "usage: code-search [--version] [--help]\n"; }
+void printUsage(std::ostream& out) {
+    out << "usage: code-search [--version] [--help]\n";
+}
 
 }  // namespace
 

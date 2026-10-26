@@ -1,5 +1,5 @@
 add_executable(codesearch_benchmarks
-  version_bench.cpp
+  index_bench.cpp
 )
 target_link_libraries(codesearch_benchmarks PRIVATE codesearch_core benchmark::benchmark_main)
 codesearch_set_warnings(codesearch_benchmarks)

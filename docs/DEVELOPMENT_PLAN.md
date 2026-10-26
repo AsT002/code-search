@@ -32,6 +32,8 @@ Done when: `ctest` passes in the normal and sanitizer builds.
 
 ## M1: In-memory core
 
+Status: done.
+
 - `trigram.hpp`: pull out trigrams, lowercase ASCII only (no locale), pack each
   trigram into a `uint32_t`, and keep each trigram once per file.
 - `IndexBuilder` in memory, using `unordered_map<uint32_t, vector<uint32_t>>`.
@@ -40,7 +42,7 @@ Done when: `ctest` passes in the normal and sanitizer builds.
   when one runs out.
 - A small query tree with `Literal` and `And`. Text shorter than 3 bytes becomes
   `All`.
-- `LiteralMatcher`, and `Evaluator` with `matchesDocument` and `collectSpans`.
+- `LiteralMatcher`, and `Evaluator` with `matches` and `collectSpans`.
   Matches are byte offsets; line and column are worked out for display.
 - A brute-force reference search that shares no code with the planner.
 - A basic benchmark that records build time, search time and peak memory. We

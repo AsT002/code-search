@@ -4,6 +4,6 @@
 
 namespace codesearch {
 
-std::string_view version() noexcept;
+std::string_view version();
 
 }  // namespace codesearch

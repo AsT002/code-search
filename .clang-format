@@ -5,3 +5,12 @@ AccessModifierOffset: -4
 DerivePointerAlignment: false
 PointerAlignment: Left
 IncludeBlocks: Preserve
+
+# Give every function body, if, loop and lambda its own lines, so similar code
+# looks the same no matter how short it is. Small getters written inside a
+# class may still stay on one line.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortLambdasOnASingleLine: Empty

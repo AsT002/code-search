@@ -24,6 +24,13 @@ endif()
 
 # Core library
 add_library(codesearch_core
+  src/index/memory_index.cpp
+  src/index/trigram.cpp
+  src/query/planner.cpp
+  src/search/candidates.cpp
+  src/search/evaluator.cpp
+  src/search/literal_matcher.cpp
+  src/search/searcher.cpp
   src/version.cpp
 )
 target_include_directories(codesearch_core PUBLIC include)

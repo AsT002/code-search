@@ -97,15 +97,22 @@ public:
     void advance(uint32_t target);  // move to the first doc >= target
 };
 
-class ShardReader {  // mmap'd, read-only, safe to share between threads
+// What search code reads from. MemoryIndex (M1) and ShardReader (M3) both
+// implement it, so search works the same on either.
+class IndexReader {
+public:
+    virtual ~IndexReader() = default;
+    virtual uint32_t docCount() const = 0;
+    virtual std::optional<PostingCursor> postings(Trigram trigram) const = 0;
+    virtual std::string_view path(DocId doc) const = 0;
+    // The content may be mapped or decompressed. The view is only valid inside fn.
+    virtual void withContent(DocId doc,
+                             const std::function<void(std::string_view)>& fn) const = 0;
+};
+
+class ShardReader : public IndexReader {  // mmap'd, read-only, safe to share between threads
 public:
     static ShardReader open(const std::filesystem::path& path);
-    std::optional<PostingCursor> postings(uint32_t trigram) const;
-    DocInfo doc(uint32_t docId) const;
-    // The content may be mapped or decompressed. The view is only valid inside fn.
-    void withContent(uint32_t docId,
-                     const std::function<void(std::string_view)>& fn) const;
-    uint32_t docCount() const;
     const ObjectId& commit() const;
 };
 
@@ -130,18 +137,21 @@ struct ShardPlan {             // one per repo
 };
 
 // search/
-class Matcher {
+// M1 has LiteralMatcher only. A shared Matcher base class arrives with
+// RegexMatcher in M8.
+class LiteralMatcher {
 public:
-    virtual ~Matcher() = default;
+    LiteralMatcher(std::string_view pattern, bool caseSensitive);
     // Calls onMatch for each match. Return false from onMatch to stop.
-    virtual void findAll(std::string_view content,
-                         const std::function<bool(Span)>& onMatch) const = 0;
+    void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 };
 
+// Built once per search from the whole query, then used on each candidate file.
 class Evaluator {
 public:
-    bool matchesDocument(const DocView& doc, const QueryNode& expr) const;
-    std::vector<Span> collectSpans(const DocView& doc, const QueryNode& expr) const;
+    Evaluator(const QueryNode& query, const SearchOptions& options);
+    bool matches(std::string_view content) const;
+    std::vector<Span> collectSpans(std::string_view content) const;
 };
 
 class Searcher {
@@ -430,7 +440,7 @@ output becomes stable.
 | `repo:` | Exact repo name |
 | Incomplete results | Results say if they're complete, cut off by a limit, or cancelled |
 
-Checking a file has two steps. `matchesDocument` decides yes or no using the
+Checking a file has two steps. `matches` decides yes or no using the
 whole query. `collectSpans` then finds what to highlight, only for files that
 matched. For `foo -bar`, a file isn't shown until we've checked it has no `bar`.
 
@@ -456,8 +466,8 @@ matched. For `foo -bar`, a file isn't shown until we've checked it has no `bar`.
  ┌──────────────────────────────────────────────────────────────┐
  │ candidates = run(TrigramQuery)                               │
  │   for each candidate:                                        │
- │     matchesDocument(doc, whole query)                        │
- │     collectSpans(doc, whole query)                           │
+ │     Evaluator.matches(content)       uses the whole query    │
+ │     Evaluator.collectSpans(content)                          │
  └───────────────────────────────┬──────────────────────────────┘
                                  ▼
                      results, in order, within limits
@@ -512,7 +522,7 @@ code-search search "authenticate"
  3. ORDER     rarest first: "nti"(41) "tic"(88) "aut"(212) …
  4. INTERSECT step through the lists together, stop early if empty
               → candidates {3, 17, 42}
- 5. CHECK     withContent(3, …) → matchesDocument → collectSpans
+ 5. CHECK     withContent(3, …) → matches → collectSpans
  6. OUTPUT    src/auth/login.ts:12:14:  export async function authenticate(user) {
 ```
 
