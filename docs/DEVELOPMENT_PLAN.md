@@ -54,6 +54,8 @@ CRLF) always give the same results as brute force.
 
 ## M2: Reading from Git
 
+Status: done.
+
 - `GitRunner`: `posix_spawn` with an argument list, `--` before arguments, stderr
   always drained.
 - Look up the commit ID once and pass it to every Git command after that.

@@ -68,7 +68,7 @@ test and benchmark the core without Git.
 | `index/`  | Decide which files to index, extract trigrams, write and read index files | `FileFilter`, `IndexBuilder`, `ShardWriter`, `ShardReader`, `PostingCursor` |
 | `query/`  | Parse a query into a tree and plan how to run it | `Parser`, `QueryNode`, `Planner`, `RepoSelection`, `TrigramQuery` |
 | `search/` | Find candidate files, check them, collect matches, sort and limit results | `Matcher`, `Evaluator`, `Searcher` |
-| `util/`   | Small shared helpers | `MmapFile`, `AtomicFile`, `ThreadPool`, `FileLock` |
+| `util/`   | Small shared helpers | `Process`, `MmapFile`, `AtomicFile`, `ThreadPool`, `FileLock` |
 | `app/`    | Tie the modules together | `RepoManager`, `SearchService` |
 
 ### Main interfaces
@@ -190,7 +190,8 @@ Rules:
 | Normal file | Index it if the filter allows |
 | Symlink | Skip and count |
 | Submodule | Skip and count |
-| Git LFS pointer | Skip and count. Never show the pointer as if it were the real file |
+| Git LFS pointer | Skip and count. Never show the pointer as if it were the real file. Only files that fully match the pointer format in the LFS spec count |
+| Missing contents | Stop with an error. Skipping would give results that look complete but aren't |
 
 ### What gets indexed
 
@@ -625,16 +626,18 @@ code-search/
 │   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp  postings.hpp
 │   ├── query/      ast.hpp  parser.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     matcher.hpp  evaluator.hpp  searcher.hpp  result.hpp
-│   ├── app/        repo_manager.hpp  search_service.hpp
-│   └── util/       mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
+│   ├── app/        index_commit.hpp  repo_manager.hpp  search_service.hpp
+│   └── util/       process.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
 │                   thread_pool.hpp  file_lock.hpp
 ├── src/                        same layout as include/
 ├── cli/main.cpp                builds the `code-search` program
 ├── tests/
 │   ├── unit/                   one file per module
+│   ├── cli/                    runs the real `code-search` program
 │   ├── differential/           index search vs brute force
+│   ├── integration/            Git to search, start to finish
 │   ├── fuzz/                   index reader, query parser
-│   └── fixtures/               small Git repos made during test setup
+│   └── support/                brute-force search, temp Git repos, a fake `git` for broken output
 ├── benchmarks/
 └── docs/
 ```

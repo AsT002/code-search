@@ -1,5 +1,6 @@
 # Disabled checks fall into two groups:
-# - too noisy for this project (magic numbers, short names, include cleanup)
+# - too noisy for this project (magic numbers, short names, include cleanup,
+#   1-byte enums)
 # - they push toward newer, denser C++ that's harder to read, and we prefer
 #   plain loops and calls (ranges, [[nodiscard]] everywhere, designated
 #   initializers, any_of/all_of rewrites, emplace_back)
@@ -28,6 +29,7 @@ Checks: >
   -modernize-use-nodiscard,
   -modernize-use-ranges,
   -modernize-use-trailing-return-type,
+  -performance-enum-size,
   -portability-avoid-pragma-once,
   -readability-identifier-length,
   -readability-magic-numbers,

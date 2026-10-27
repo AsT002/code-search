@@ -32,6 +32,24 @@ Other presets:
 
 All presets treat compiler warnings as errors.
 
+## Search a repo
+
+For now, `search` indexes the repo's current commit in memory every time it
+runs. Saved indexes come in M3.
+
+```sh
+./build/debug/code-search search --path ~/projects/backend "authenticate"
+./build/debug/code-search search --path . -l "TODO"              # file names only
+./build/debug/code-search search --path . --case-sensitive "Foo"
+./build/debug/code-search search --path . -- "--verbose"        # text starting with -
+```
+
+Exit codes work like grep: 0 found something, 1 found nothing, 2 error.
+
+It searches the last commit, not uncommitted changes. Binary files, files over
+1 MB, symlinks, submodules, Git LFS pointers and minified JS and CSS are
+skipped. A summary of what was skipped goes to stderr.
+
 ## Formatting
 
 ```sh

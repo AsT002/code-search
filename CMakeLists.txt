@@ -24,6 +24,11 @@ endif()
 
 # Core library
 add_library(codesearch_core
+  src/app/index_commit.cpp
+  src/git/git_repo.cpp
+  src/git/git_runner.cpp
+  src/git/object_id.cpp
+  src/index/file_filter.cpp
   src/index/memory_index.cpp
   src/index/trigram.cpp
   src/query/planner.cpp
@@ -31,9 +36,12 @@ add_library(codesearch_core
   src/search/evaluator.cpp
   src/search/literal_matcher.cpp
   src/search/searcher.cpp
+  src/util/process.cpp
   src/version.cpp
 )
 target_include_directories(codesearch_core PUBLIC include)
+find_package(Threads REQUIRED)
+target_link_libraries(codesearch_core PUBLIC Threads::Threads)
 target_compile_definitions(codesearch_core PRIVATE CODESEARCH_VERSION="${PROJECT_VERSION}")
 codesearch_set_warnings(codesearch_core)
 codesearch_set_clang_tidy(codesearch_core)
