@@ -74,6 +74,12 @@ TEST(IsLfsPointer, RejectsBadExtensionValuesAndRepeatedVersion) {
     EXPECT_FALSE(isLfsPointer(version + version + oid + size));
     EXPECT_FALSE(isLfsPointer(version + oid + size + version));
 
+    // Pointer files must be valid UTF-8.
+    EXPECT_FALSE(isLfsPointer(version + "ext-0-foo a\xFF\n" + oid + size));
+    EXPECT_FALSE(isLfsPointer(version + oid + size + "x-note \xC3\n"));  // cut-off character
+    // Valid non-ASCII text in a value is allowed.
+    EXPECT_TRUE(isLfsPointer(version + "ext-0-foo caf\xC3\xA9\n" + oid + size));
+
     // Size 0 is fine.
     EXPECT_TRUE(isLfsPointer(version + oid + "size 0\n"));
 }

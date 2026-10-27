@@ -37,6 +37,7 @@ add_library(codesearch_core
   src/search/literal_matcher.cpp
   src/search/searcher.cpp
   src/util/process.cpp
+  src/util/utf8.cpp
   src/version.cpp
 )
 target_include_directories(codesearch_core PUBLIC include)

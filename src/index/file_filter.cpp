@@ -2,6 +2,8 @@
 
 #include <fnmatch.h>
 
+#include "codesearch/util/utf8.hpp"
+
 #include <utility>
 
 namespace codesearch {
@@ -152,11 +154,12 @@ bool isLfsOid(std::string_view value) {
 bool isLfsPointer(std::string_view content) {
     // Follows the pointer format in the Git LFS spec
     // (https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md#the-pointer):
-    // - under 1024 bytes, made only of "key value\n" lines
+    // - under 1024 bytes, valid UTF-8, made only of "key value\n" lines
     // - "version" comes first, the other keys follow in sorted order
     // - one space between key and value; values have no carriage returns
     // - "oid" is "sha256:" plus 64 hex characters, "size" is a number
-    if (content.size() >= 1024 || content.empty() || content.back() != '\n') {
+    if (content.size() >= 1024 || content.empty() || content.back() != '\n' ||
+        !isValidUtf8(content)) {
         return false;
     }
 

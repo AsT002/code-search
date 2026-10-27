@@ -627,7 +627,7 @@ code-search/
 │   ├── query/      ast.hpp  parser.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     matcher.hpp  evaluator.hpp  searcher.hpp  result.hpp
 │   ├── app/        index_commit.hpp  repo_manager.hpp  search_service.hpp
-│   └── util/       process.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
+│   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
 │                   thread_pool.hpp  file_lock.hpp
 ├── src/                        same layout as include/
 ├── cli/main.cpp                builds the `code-search` program

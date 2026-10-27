@@ -102,12 +102,13 @@ TEST(IndexCommit, IndexesFilesThatOnlyLookLikeLfsPointers) {
     TempRepo repo;
     repo.write("cr.txt", version + "ext-0-foo sha256:00\r\n" + oid + "size 1\n");
     repo.write("twice.txt", version + version + oid + "size 1\n");
+    repo.write("utf8.txt", version + "ext-0-foo a\xFF\n" + oid + "size 1\n");
     repo.write("real.bin", version + oid + "size 1\n");
     const ObjectId commit = repo.commit();
 
     const CommitIndex built = indexCommit(GitRepo(repo.dir()), commit, FileFilter());
     EXPECT_EQ(matchingPaths(built.index, "git-lfs.github.com", false),
-              (std::vector<std::string>{"cr.txt", "twice.txt"}));
+              (std::vector<std::string>{"cr.txt", "twice.txt", "utf8.txt"}));
     EXPECT_EQ(built.report.skipped.at(SkipReason::LfsPointer).files, 1U);
 }
 

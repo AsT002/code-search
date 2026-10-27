@@ -16,6 +16,7 @@ add_executable(codesearch_tests
   unit/process_test.cpp
   unit/searcher_test.cpp
   unit/trigram_test.cpp
+  unit/utf8_test.cpp
   unit/version_test.cpp
 )
 target_link_libraries(codesearch_tests PRIVATE codesearch_core GTest::gtest_main)
