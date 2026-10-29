@@ -27,17 +27,23 @@ add_library(codesearch_core
   src/app/index_commit.cpp
   src/git/git_repo.cpp
   src/git/git_runner.cpp
-  src/git/object_id.cpp
   src/index/file_filter.cpp
   src/index/memory_index.cpp
+  src/index/posting_cursor.cpp
+  src/index/shard_format.cpp
+  src/index/shard_reader.cpp
+  src/index/shard_writer.cpp
   src/index/trigram.cpp
   src/query/planner.cpp
   src/search/candidates.cpp
   src/search/evaluator.cpp
   src/search/literal_matcher.cpp
   src/search/searcher.cpp
+  src/util/mmap_file.cpp
+  src/util/object_id.cpp
   src/util/process.cpp
   src/util/utf8.cpp
+  src/util/varint.cpp
   src/version.cpp
 )
 target_include_directories(codesearch_core PUBLIC include)

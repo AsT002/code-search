@@ -16,6 +16,9 @@ public:
     std::string_view path(DocId doc) const override;
     void withContent(DocId doc, const std::function<void(std::string_view)>& fn) const override;
 
+    // Every trigram that appears in some doc, sorted.
+    std::vector<Trigram> trigrams() const;
+
 private:
     // IndexBuilder fills in the private fields below.
     friend class IndexBuilder;

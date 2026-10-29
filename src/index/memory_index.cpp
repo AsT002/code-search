@@ -1,5 +1,6 @@
 #include "codesearch/index/memory_index.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -24,6 +25,16 @@ std::string_view MemoryIndex::path(DocId doc) const {
 
 void MemoryIndex::withContent(DocId doc, const std::function<void(std::string_view)>& fn) const {
     fn(docs_.at(doc).content);
+}
+
+std::vector<Trigram> MemoryIndex::trigrams() const {
+    std::vector<Trigram> result;
+    result.reserve(postings_.size());
+    for (const auto& [trigram, docs] : postings_) {
+        result.push_back(trigram);
+    }
+    std::sort(result.begin(), result.end());  // the map keeps no order
+    return result;
 }
 
 DocId IndexBuilder::add(std::string path, std::string content) {

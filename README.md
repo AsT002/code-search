@@ -34,8 +34,8 @@ All presets treat compiler warnings as errors.
 
 ## Search a repo
 
-For now, `search` indexes the repo's current commit in memory every time it
-runs. Saved indexes come in M3.
+With `--path`, `search` indexes the repo's current commit in memory every time
+it runs. To skip that, see "Save an index" below.
 
 ```sh
 ./build/debug/code-search search --path ~/projects/backend "authenticate"
@@ -50,6 +50,22 @@ It searches the last commit, not uncommitted changes. Binary files, files over
 1 MB, symlinks, submodules, Git LFS pointers and minified JS and CSS are
 skipped. A summary of what was skipped goes to stderr.
 
+## Save an index
+
+Indexing every time is slow on big repos. You can save the index to a file and
+search that instead. Saved indexes get managed for you in M4.
+
+```sh
+./build/debug/code-search index --path ~/projects/backend --out backend.idx
+./build/debug/code-search search --index backend.idx "authenticate"
+./build/debug/code-search verify backend.idx    # full check of the file
+```
+
+The file holds one commit. Searching it doesn't look at the repo, so new commits
+show up only after you run `index` again. If `index` fails, any old file at
+`--out` is kept as it was. `verify` exits with 0 if the file is fine, 1 if it is
+damaged, and 2 if it can't be read at all.
+
 ## Formatting
 
 ```sh
@@ -63,4 +79,7 @@ cmake --build build/debug --target format-check  # check only
 cmake --preset release
 cmake --build --preset release
 ./build/release/benchmarks/codesearch_benchmarks
+./build/release/benchmarks/storage_experiment <path-to-repo>  # index size and format choices
 ```
+
+Results and what we decided from them are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

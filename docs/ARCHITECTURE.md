@@ -63,12 +63,12 @@ test and benchmark the core without Git.
 
 | Module    | Job | Main types |
 |-----------|-----|------------|
-| `git/`    | Run Git without a shell. Clone, fetch, look up a commit ID, list files, read file contents by ID | `GitRunner`, `GitRepo`, `ObjectId`, `BlobStream` |
+| `git/`    | Run Git without a shell. Clone, fetch, look up a commit ID, list files, read file contents by ID | `GitRunner`, `GitRepo`, `BlobStream` |
 | `repo/`   | Workspace folders, registry, publishing new index files, cleanup, locking | `Workspace`, `Registry`, `RegistryStore`, `RepoId`, `Publisher` |
 | `index/`  | Decide which files to index, extract trigrams, write and read index files | `FileFilter`, `IndexBuilder`, `ShardWriter`, `ShardReader`, `PostingCursor` |
 | `query/`  | Parse a query into a tree and plan how to run it | `Parser`, `QueryNode`, `Planner`, `RepoSelection`, `TrigramQuery` |
 | `search/` | Find candidate files, check them, collect matches, sort and limit results | `Matcher`, `Evaluator`, `Searcher` |
-| `util/`   | Small shared helpers | `Process`, `MmapFile`, `AtomicFile`, `ThreadPool`, `FileLock` |
+| `util/`   | Small shared helpers, and `ObjectId`, which both `git/` and `index/` use | `Process`, `MmapFile`, `ObjectId`, `AtomicFile`, `ThreadPool`, `FileLock` |
 | `app/`    | Tie the modules together | `RepoManager`, `SearchService` |
 
 ### Main interfaces
@@ -297,7 +297,7 @@ r_1c2d-g0004.idx
 │   24 bytes per entry                                             │
 ├──────────────────────────────────────────────────────────────────┤
 │ POSTINGS (sorted doc IDs, one list per trigram)                  │
-│   stored as raw u32 or delta-varint, set by the section codec    │
+│   delta-varint by default, or raw u32. Set by the section codec  │
 ├──────────────────────────────────────────────────────────────────┤
 │ DOC TABLE (fixed-size entries, so doc_id is an array index)      │
 │   path_off, path_len                                             │
@@ -334,8 +334,12 @@ checks, no overlaps) and counts against section sizes.
 When reading: doc IDs in range, path and content bounds, posting list bounds,
 varints that end properly, and a limit on decompressed size.
 
-Full checks, like sorted trigram keys, increasing doc IDs and checksums, live in a
-separate `code-search verify` command. That keeps normal opens fast.
+Full checks live in a separate `code-search verify` command, which keeps normal
+opens fast. It checks that trigram keys are sorted, that every posting list
+decodes to exactly its length with increasing doc IDs, that every path and file
+is in range, and that the posting lists match the trigrams of the stored
+contents. That last check works like a checksum for the postings and most
+content damage. There is no separate checksum field yet.
 
 ### Index size
 
@@ -353,7 +357,9 @@ index_bytes = C + 4·P + 24·T + N·D + L + header and padding
 ```
 
 Raw postings can be several times the content size for some files, and the
-stored contents add another 1×. M2.5 gives us real numbers. Every build reports:
+stored contents add another 1×. In M2.5, delta-varint postings with raw contents
+came to 1.2 to 1.3× the source size (see [BENCHMARKS.md](BENCHMARKS.md)). Every
+build reports:
 
 - bytes per section, and bytes per byte of indexed source
 - total disk used by the workspace, including clones
@@ -620,14 +626,16 @@ code-search/
 ├── CMakePresets.json
 ├── cmake/                      warnings, tools, pinned dependencies
 ├── include/codesearch/
-│   ├── git/        git_runner.hpp  git_repo.hpp  object_id.hpp
+│   ├── git/        git_runner.hpp  git_repo.hpp
 │   ├── repo/       workspace.hpp  registry.hpp  publisher.hpp
 │   ├── index/      trigram.hpp  file_filter.hpp  index_builder.hpp
-│   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp  postings.hpp
+│   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp
+│               posting_cursor.hpp  index_file_error.hpp
 │   ├── query/      ast.hpp  parser.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     matcher.hpp  evaluator.hpp  searcher.hpp  result.hpp
 │   ├── app/        index_commit.hpp  repo_manager.hpp  search_service.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
+│                   object_id.hpp
 │                   thread_pool.hpp  file_lock.hpp
 ├── src/                        same layout as include/
 ├── cli/main.cpp                builds the `code-search` program

@@ -27,3 +27,18 @@ if(CODESEARCH_BUILD_BENCHMARKS)
   )
   FetchContent_MakeAvailable(benchmark)
 endif()
+
+# LZ4, only for the storage experiment (M2.5). We compile its one C file
+# ourselves instead of using its own CMake setup, which builds much more.
+if(CODESEARCH_BUILD_BENCHMARKS)
+  FetchContent_Declare(lz4
+    URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
+    URL_HASH SHA256=537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR no-cmake  # no CMakeLists.txt here, so nothing gets added
+  )
+  FetchContent_MakeAvailable(lz4)
+  enable_language(C)
+  add_library(lz4 STATIC ${lz4_SOURCE_DIR}/lib/lz4.c)
+  target_include_directories(lz4 SYSTEM PUBLIC ${lz4_SOURCE_DIR}/lib)
+endif()

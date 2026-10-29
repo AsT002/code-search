@@ -8,6 +8,9 @@
 #include <vector>
 
 #include "codesearch/app/index_commit.hpp"
+#include "codesearch/index/index_file_error.hpp"
+#include "codesearch/index/shard_reader.hpp"
+#include "codesearch/index/shard_writer.hpp"
 #include "codesearch/search/searcher.hpp"
 #include "codesearch/version.hpp"
 
@@ -18,15 +21,19 @@ using namespace codesearch;
 void printUsage(std::ostream& out) {
     out << "usage:\n"
            "  code-search search --path <repo> [--case-sensitive] [-l] [--] <text>\n"
+           "  code-search search --index <file> [--case-sensitive] [-l] [--] <text>\n"
            "\n"
            "Use -- before text that starts with a dash, like: -- --flag\n"
            "\n"
+           "  code-search index --path <repo> --out <file>\n"
+           "  code-search verify <file>\n"
            "  code-search --version\n"
            "  code-search --help\n";
 }
 
 struct SearchArgs {
-    std::string repoPath;
+    std::string repoPath;   // search a repo, indexing it first
+    std::string indexPath;  // or search a saved index file
     std::string text;
     bool caseSensitive = false;
     bool filesOnly = false;  // -l: print only the paths of matching files
@@ -41,6 +48,9 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
         if (arg == "--path" && i + 1 < args.size()) {
             ++i;
             result.repoPath = args[i];
+        } else if (arg == "--index" && i + 1 < args.size()) {
+            ++i;
+            result.indexPath = args[i];
         } else if (arg == "--case-sensitive") {
             result.caseSensitive = true;
         } else if (arg == "-l") {
@@ -57,7 +67,32 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
             return std::nullopt;
         }
     }
-    if (result.repoPath.empty() || !haveText) {
+    // Exactly one of --path and --index.
+    if (result.repoPath.empty() == result.indexPath.empty() || !haveText) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+struct IndexArgs {
+    std::string repoPath;
+    std::string outPath;
+};
+
+// Reads the arguments after "index".
+std::optional<IndexArgs> parseIndexArgs(std::span<char*> args) {
+    IndexArgs result;
+    for (std::size_t i = 0; i + 1 < args.size(); i += 2) {
+        const std::string_view flag = args[i];
+        if (flag == "--path") {
+            result.repoPath = args[i + 1];
+        } else if (flag == "--out") {
+            result.outPath = args[i + 1];
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (args.size() % 2 != 0 || result.repoPath.empty() || result.outPath.empty()) {
         return std::nullopt;
     }
     return result;
@@ -92,20 +127,29 @@ void printReport(const ObjectId& commit, const IngestReport& report) {
     std::cerr << '\n';
 }
 
-int runSearch(const SearchArgs& args) {
-    const GitRepo repo(args.repoPath);
+struct BuiltRepo {
+    ObjectId commit;
+    CommitIndex built;
+};
+
+// Indexes the repo's HEAD in memory and prints what was indexed. Returns
+// nothing, after saying why, if the repo has no commits.
+std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& filter) {
+    const GitRepo repo(path);
     const std::optional<ObjectId> commit = repo.resolveHead();
     if (!commit.has_value()) {
         std::cerr << "code-search: the repository has no commits yet\n";
-        return 1;
+        return std::nullopt;
     }
+    BuiltRepo result{.commit = commit.value(), .built = indexCommit(repo, commit.value(), filter)};
+    printReport(result.commit, result.built.report);
+    return result;
+}
 
-    const CommitIndex built = indexCommit(repo, commit.value(), FileFilter());
-    printReport(commit.value(), built.report);
-
+int printResults(const IndexReader& index, const SearchArgs& args) {
     SearchOptions options;
     options.caseSensitive = args.caseSensitive;
-    const SearchResults results = search(built.index, literal(args.text), options);
+    const SearchResults results = search(index, literal(args.text), options);
 
     for (const FileMatch& file : results.files) {
         if (!std::cout) {
@@ -115,7 +159,7 @@ int runSearch(const SearchArgs& args) {
             std::cout << file.path << '\n';
             continue;
         }
-        built.index.withContent(file.doc, [&file](std::string_view content) {
+        index.withContent(file.doc, [&file](std::string_view content) {
             std::size_t lastLine = 0;
             for (const Match& match : file.matches) {
                 if (match.line == lastLine) {
@@ -128,6 +172,49 @@ int runSearch(const SearchArgs& args) {
         });
     }
     return results.files.empty() ? 1 : 0;  // like grep: 1 means nothing found
+}
+
+int runSearch(const SearchArgs& args) {
+    if (!args.indexPath.empty()) {
+        const ShardReader reader(args.indexPath);
+        return printResults(reader, args);
+    }
+    const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, FileFilter());
+    if (!repo.has_value()) {
+        return 1;
+    }
+    return printResults(repo->built.index, args);
+}
+
+int runIndex(const IndexArgs& args) {
+    const FileFilter filter;
+    const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, filter);
+    if (!repo.has_value()) {
+        return 1;
+    }
+    const ShardInfo info{
+        .commit = repo->commit,
+        .policyVersion = kPolicyVersion,
+        .configFingerprint = configFingerprint(filter.config()),
+    };
+    writeShard(repo->built.index, info, args.outPath);
+    std::cerr << "wrote " << args.outPath << '\n';
+    return 0;
+}
+
+// Exit codes: 0 the file is fine, 1 it is damaged, 2 it can't be read at all.
+int runVerify(const std::string& path) {
+    try {
+        const ShardReader reader(path);
+        reader.verify();
+        std::cout << path << ": ok, " << reader.docCount() << " files, "
+                  << reader.header().trigramCount << " trigrams, commit " << reader.commit().hex()
+                  << '\n';
+        return 0;
+    } catch (const IndexFileError& error) {
+        std::cerr << "code-search: " << path << ": " << error.what() << '\n';
+        return 1;
+    }
 }
 
 int run(std::span<char*> args) {
@@ -150,6 +237,19 @@ int run(std::span<char*> args) {
             return 2;
         }
         return runSearch(searchArgs.value());
+    }
+
+    if (args.size() >= 2 && std::string_view(args[1]) == "index") {
+        const std::optional<IndexArgs> indexArgs = parseIndexArgs(args.subspan(2));
+        if (!indexArgs.has_value()) {
+            printUsage(std::cerr);
+            return 2;
+        }
+        return runIndex(indexArgs.value());
+    }
+
+    if (args.size() == 3 && std::string_view(args[1]) == "verify") {
+        return runVerify(args[2]);
     }
 
     printUsage(std::cerr);

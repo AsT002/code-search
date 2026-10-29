@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "codesearch/git/git_runner.hpp"
-#include "codesearch/git/object_id.hpp"
+#include "codesearch/util/object_id.hpp"
 
 namespace codesearch {
 

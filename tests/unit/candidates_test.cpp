@@ -29,6 +29,15 @@ TEST(PostingCursor, WalksAndSkips) {
     EXPECT_TRUE(cursor.done());
 }
 
+TEST(MemoryIndex, ListsTrigramsSorted) {
+    IndexBuilder builder;
+    builder.add("0", "cab");
+    builder.add("1", "abc");
+    const MemoryIndex index = builder.build();
+    EXPECT_EQ(index.trigrams(),
+              (std::vector<Trigram>{packTrigram('a', 'b', 'c'), packTrigram('c', 'a', 'b')}));
+}
+
 MemoryIndex sampleIndex() {
     IndexBuilder builder;
     builder.add("0", "hello world");

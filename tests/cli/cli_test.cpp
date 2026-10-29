@@ -6,12 +6,14 @@
 #include <string>
 #include <vector>
 
+#include "../support/temp_dir.hpp"
 #include "../support/temp_repo.hpp"
 #include "codesearch/util/process.hpp"
 
 namespace codesearch {
 namespace {
 
+using testing::TempDir;
 using testing::TempRepo;
 
 ProcessResult codeSearch(const std::vector<std::string>& args) {
@@ -95,6 +97,14 @@ TEST(Cli, BadArgumentsPrintUsage) {
         {"search", "--path", ".", "--", "a", "b"},       // more after "--" text
         {"search", "--path", ".", "--", "a", "--path"},  // same
         {"search", "--path", ".", "--"},                 // nothing after "--"
+        {"search", "--path", ".", "--index", "x", "a"},  // both --path and --index
+        {"search", "--index", "x"},                      // no text
+        {"index", "--path", "."},                        // no --out
+        {"index", "--out", "x"},                         // no --path
+        {"index", "--path", ".", "--out"},               // --out without a value
+        {"index", "--path", ".", "--out", "x", "--z", "y"},
+        {"verify"},
+        {"verify", "a", "b"},
         {"unknown"},
     };
     for (const std::vector<std::string>& args : cases) {
@@ -158,6 +168,98 @@ TEST(CliErrors, ClosedOutputIsAnError) {
     EXPECT_EQ(exitCode, 2);
     EXPECT_TRUE(contains(search.errorOutput(), "could not write the output"))
         << search.errorOutput();
+}
+
+// ---- Saved index files ----
+
+// Saves the repo's index to `file`.
+void indexTo(const TempRepo& repo, const std::string& file) {
+    const ProcessResult result =
+        codeSearch({"index", "--path", repo.dir().string(), "--out", file});
+    ASSERT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(contains(result.err, "indexed 3 files")) << result.err;
+}
+
+ProcessResult searchFile(const std::string& file, std::vector<std::string> args) {
+    args.insert(args.begin(), {"search", "--index", file});
+    return codeSearch(args);
+}
+
+TEST(CliIndex, SavedIndexGivesTheSameOutput) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir dir;
+    const std::string file = dir.file("repo.idx").string();
+    indexTo(repo, file);
+
+    const std::vector<std::vector<std::string>> cases = {
+        {"target"}, {"-l", "target"}, {"--case-sensitive", "Target"}, {"--", "->"}, {"none here"},
+    };
+    for (const std::vector<std::string>& args : cases) {
+        const ProcessResult fromRepo = searchIn(repo, args);
+        const ProcessResult fromFile = searchFile(file, args);
+        EXPECT_EQ(fromFile.exitCode, fromRepo.exitCode) << ::testing::PrintToString(args);
+        EXPECT_EQ(fromFile.out, fromRepo.out) << ::testing::PrintToString(args);
+        EXPECT_EQ(fromFile.err, "");  // nothing gets indexed, so no report
+    }
+}
+
+TEST(CliIndex, SavedIndexKeepsItsCommit) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir dir;
+    const std::string file = dir.file("repo.idx").string();
+    indexTo(repo, file);
+
+    repo.write("c.txt", "new target\n");
+    repo.commit();
+    EXPECT_EQ(searchFile(file, {"-l", "target"}).out, "a.txt\nflags.sh\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "target"}).out, "a.txt\nc.txt\nflags.sh\n");
+}
+
+TEST(CliIndex, VerifyChecksTheFile) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir dir;
+    const std::filesystem::path file = dir.file("repo.idx");
+    indexTo(repo, file.string());
+
+    ProcessResult result = codeSearch({"verify", file.string()});
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(contains(result.out, "ok, 3 files")) << result.out;
+
+    // Change one byte of a file's content. Opening still works, so search
+    // can't tell, but verify can.
+    std::string bytes = testing::readFile(file);
+    bytes[bytes.find("second Target") + 2] = 'X';
+    testing::writeFile(file, bytes);
+    result = codeSearch({"verify", file.string()});
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_TRUE(contains(result.err, "index file is damaged")) << result.err;
+
+    // A file that isn't an index at all.
+    testing::writeFile(file, "hello");
+    result = codeSearch({"verify", file.string()});
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_TRUE(contains(result.err, "not an index file")) << result.err;
+    result = codeSearch({"search", "--index", file.string(), "x"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "not an index file")) << result.err;
+
+    // A file that doesn't exist can't be checked at all.
+    result = codeSearch({"verify", dir.file("missing.idx").string()});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "could not open")) << result.err;
+}
+
+TEST(CliIndex, EmptyRepoWritesNothing) {
+    const TempRepo repo;
+    const TempDir dir;
+    const ProcessResult result =
+        codeSearch({"index", "--path", repo.dir().string(), "--out", dir.file("x.idx").string()});
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_TRUE(contains(result.err, "no commits")) << result.err;
+    EXPECT_FALSE(std::filesystem::exists(dir.file("x.idx")));
 }
 
 TEST(CliErrors, Version) {

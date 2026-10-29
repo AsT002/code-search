@@ -79,6 +79,9 @@ symlinks, submodules, LFS pointers and huge files. On a real repo, results match
 
 ## M2.5: Storage experiments
 
+Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). M3 defaults:
+delta-varint postings, raw contents.
+
 A short round of measurements on two or three repos (small, medium, large) before
 we fix the M3 defaults.
 
@@ -92,6 +95,22 @@ Done when: results are in `docs/BENCHMARKS.md` and the M3 defaults are picked
 from them. Raw stays available either way.
 
 ## M3: Index files
+
+Status: done. Notes:
+
+- The CLI has temporary commands until M4: `index --path <repo> --out <file>`,
+  `search --index <file>` and `verify <file>`.
+- The damaged-file tests are a seeded GoogleTest (thousands of random changes to
+  a valid file), not libFuzzer, so they run with the normal tests and under ASan.
+- The doc table has room for each file's blob ID, but it's left as zeros until
+  something needs it.
+- `writeShard` writes a temp file in the same folder and renames it over the
+  target, so a failed write keeps the old file. It writes only through the
+  descriptor `mkstemp` returns, and checks before the rename that the temp name
+  still points at that file, so swapping the name can't redirect the write. M4's `Publisher` adds the lock,
+  fsync and registry on top.
+- `MmapFile` opens with `O_NONBLOCK`, so a FIFO is rejected instead of hanging.
+- `ObjectId` moved from `git/` to `util/`, so `index/` doesn't include `git/`.
 
 - `shard_format.hpp`: little-endian fixed-size fields, header with feature flags,
   a 32-byte hash field with its algorithm and length, `policy_version`,

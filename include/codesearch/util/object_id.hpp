@@ -7,7 +7,9 @@
 
 namespace codesearch {
 
-// A full SHA-1 object ID from Git, stored as 40 lowercase hex characters.
+// A full SHA-1 object ID, stored as 40 lowercase hex characters. Git makes
+// these, but the index files store them too, so the type lives here where
+// both git/ and index/ can use it.
 class ObjectId {
 public:
     // Returns nothing unless `hex` is exactly 40 lowercase hex characters.

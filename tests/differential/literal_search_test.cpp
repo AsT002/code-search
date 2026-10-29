@@ -10,7 +10,11 @@
 #include <vector>
 
 #include "../support/brute_force.hpp"
+#include "../support/temp_dir.hpp"
+#include "../support/test_ids.hpp"
 #include "codesearch/index/memory_index.hpp"
+#include "codesearch/index/shard_reader.hpp"
+#include "codesearch/index/shard_writer.hpp"
 #include "codesearch/query/planner.hpp"
 #include "codesearch/search/candidates.hpp"
 #include "codesearch/search/searcher.hpp"
@@ -106,7 +110,7 @@ std::string describe(const QueryNode& query) {
 }
 
 // Compares the real search with the brute-force one for a single query.
-void checkQuery(const MemoryIndex& index, const std::vector<TestFile>& files,
+void checkQuery(const IndexReader& index, const std::vector<TestFile>& files,
                 const QueryNode& query, const SearchOptions& options) {
     const SearchResults expected = bruteForceSearch(files, query, options);
 
@@ -123,6 +127,8 @@ void checkQuery(const MemoryIndex& index, const std::vector<TestFile>& files,
 TEST(LiteralSearchDifferential, MatchesBruteForce) {
     constexpr std::uint32_t kSeeds = 300;
     constexpr int kQueriesPerSeed = 40;
+    const testing::TempDir dir;
+    const ObjectId commit = testing::fakeObjectId('0');
 
     for (std::uint32_t seed = 1; seed <= kSeeds; ++seed) {
         Generator gen(seed);
@@ -137,15 +143,29 @@ TEST(LiteralSearchDifferential, MatchesBruteForce) {
         }
         const MemoryIndex index = builder.build();
 
+        // The same index saved to disk with each posting codec, read back.
+        writeShard(index, ShardInfo{.commit = commit, .postingCodec = PostingCodec::DeltaVarint},
+                   dir.file("varint.idx"));
+        writeShard(index, ShardInfo{.commit = commit, .postingCodec = PostingCodec::Raw},
+                   dir.file("raw.idx"));
+        const ShardReader varintFile(dir.file("varint.idx"));
+        const ShardReader rawFile(dir.file("raw.idx"));
+        const std::vector<std::pair<const char*, const IndexReader*>> readers = {
+            {"memory", &index},
+            {"varint file", &varintFile},
+            {"raw file", &rawFile},
+        };
+
         for (int q = 0; q < kQueriesPerSeed; ++q) {
             const QueryNode query = gen.query(files);
             const SearchOptions options{.caseSensitive = gen.number(0, 1) == 1};
-            SCOPED_TRACE("seed " + std::to_string(seed) + ", query " + describe(query) +
-                         (options.caseSensitive ? ", case-sensitive" : ""));
-
-            checkQuery(index, files, query, options);
-            if (HasFatalFailure()) {
-                return;  // stop at the first failure so the output stays short
+            for (const auto& [name, reader] : readers) {
+                SCOPED_TRACE("seed " + std::to_string(seed) + ", " + name + ", query " +
+                             describe(query) + (options.caseSensitive ? ", case-sensitive" : ""));
+                checkQuery(*reader, files, query, options);
+                if (HasFatalFailure()) {
+                    return;  // stop at the first failure so the output stays short
+                }
             }
         }
     }

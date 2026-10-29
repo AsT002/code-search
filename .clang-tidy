@@ -35,6 +35,8 @@ Checks: >
   -readability-magic-numbers,
   -readability-use-anyofallof
 CheckOptions:
+  # Don't count what macros expand to. Every EXPECT_EQ adds hidden branches.
+  readability-function-cognitive-complexity.IgnoreMacros: true
   # A class with only "virtual ~X() = default;" doesn't need the other four.
   cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor: true
 WarningsAsErrors: '*'
