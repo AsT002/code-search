@@ -1,18 +1,13 @@
 #include "codesearch/index/shard_writer.hpp"
 
-#include <sys/stat.h>
-#include <unistd.h>  // close, write, and mkstemp on macOS
-
 #include <array>
-#include <cerrno>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "codesearch/index/shard_format.hpp"
+#include "codesearch/util/atomic_file.hpp"
 #include "codesearch/util/endian.hpp"
 #include "codesearch/util/varint.hpp"
 
@@ -103,95 +98,8 @@ DocSections encodeDocs(const MemoryIndex& index) {
     return out;
 }
 
-// A new temp file next to a target path, kept open while we write it.
-//
-// We write only through the descriptor that mkstemp gave us and never open
-// the file by name again. If someone swaps the name for something else, say
-// a symlink to another file, our writes still go to our own file.
-class TempFile {
-public:
-    explicit TempFile(const std::filesystem::path& target) {
-        // mkstemp replaces the XXXXXX with random characters, then creates
-        // and opens the file. The name is in the same folder as the target
-        // because rename() can only replace a file in one step on one disk.
-        std::string name = target.string() + ".tmp-XXXXXX";
-        fd_ = ::mkstemp(name.data());
-        if (fd_ < 0) {
-            throw std::runtime_error("could not create a temp file next to " + target.string());
-        }
-        path_ = name;
-    }
-
-    ~TempFile() {
-        if (fd_ >= 0) {
-            ::close(fd_);
-        }
-    }
-
-    TempFile(const TempFile&) = delete;
-    TempFile& operator=(const TempFile&) = delete;
-    TempFile(TempFile&&) = delete;
-    TempFile& operator=(TempFile&&) = delete;
-
-    const std::filesystem::path& path() const { return path_; }
-
-    // Adds `bytes` to the file. They're collected in a buffer and written in
-    // big pieces, since each ::write call costs a trip into the system.
-    void write(std::string_view bytes) {
-        buffer_ += bytes;
-        if (buffer_.size() >= kBufferBytes) {
-            flush();
-        }
-    }
-
-    // Writes what's left, checks that path() still names our file, and
-    // closes it. Throws std::runtime_error if any of that fails.
-    void finish() {
-        flush();
-        struct stat ours{};
-        struct stat named{};
-        // lstat looks at the name itself, not where a symlink points.
-        if (::fstat(fd_, &ours) != 0 || ::lstat(path_.c_str(), &named) != 0 ||
-            ours.st_dev != named.st_dev || ours.st_ino != named.st_ino) {
-            throw std::runtime_error(path_.string() + " was replaced while it was being written");
-        }
-        const int fd = fd_;
-        fd_ = -1;
-        if (::close(fd) != 0) {
-            fail(errno);
-        }
-    }
-
-private:
-    static constexpr std::size_t kBufferBytes = std::size_t{1} << 20U;  // 1 MiB
-
-    void flush() {
-        std::string_view rest = buffer_;
-        while (!rest.empty()) {
-            const ssize_t written = ::write(fd_, rest.data(), rest.size());
-            if (written < 0) {
-                if (errno == EINTR) {  // interrupted by a signal before writing; try again
-                    continue;
-                }
-                fail(errno);
-            }
-            rest.remove_prefix(static_cast<std::size_t>(written));  // may be a partial write
-        }
-        buffer_.clear();
-    }
-
-    [[noreturn]] void fail(int error) const {
-        throw std::runtime_error("could not write " + path_.string() + ": " +
-                                 std::strerror(error));  // NOLINT(concurrency-mt-unsafe)
-    }
-
-    int fd_ = -1;
-    std::filesystem::path path_;
-    std::string buffer_;
-};
-
 // Writes `bytes`, then zeros up to the next 8-byte boundary.
-void writeAligned(TempFile& file, std::string_view bytes, std::uint64_t& offset) {
+void writeAligned(AtomicFile& file, std::string_view bytes, std::uint64_t& offset) {
     file.write(bytes);
     offset += bytes.size();
     const std::uint64_t padded = alignTo8(offset);
@@ -235,7 +143,7 @@ Prepared prepare(const MemoryIndex& index, const ShardInfo& info) {
     return out;
 }
 
-void writeAll(TempFile& file, const Prepared& prepared, const MemoryIndex& index) {
+void writeAll(AtomicFile& file, const Prepared& prepared, const MemoryIndex& index) {
     std::uint64_t written = 0;
     writeAligned(file, prepared.header, written);
     writeAligned(file, prepared.postings.table, written);
@@ -247,7 +155,6 @@ void writeAll(TempFile& file, const Prepared& prepared, const MemoryIndex& index
             file.write(content);
         });
     }
-    file.finish();
 }
 
 }  // namespace
@@ -259,20 +166,14 @@ void writeShard(const MemoryIndex& index, const ShardInfo& info, const std::file
     // Build everything we can before touching the disk.
     const Prepared prepared = prepare(index, info);
 
-    // Write a temp file, then rename it over `path`. Until the rename, any
-    // old file at `path` is untouched, so a failure never loses it.
-    TempFile temp(path);
-    try {
-        if (afterTempCreated) {
-            afterTempCreated(temp.path());
-        }
-        writeAll(temp, prepared, index);
-        std::filesystem::rename(temp.path(), path);
-    } catch (...) {                                     // any error: clean up, then let it carry on
-        std::error_code ignored;                        // we're already failing; keep that error
-        std::filesystem::remove(temp.path(), ignored);  // a symlink is removed, not followed
-        throw;
+    // AtomicFile writes a temp file, then renames it over `path`. Until the
+    // rename, any old file at `path` is untouched, so a failure never loses it.
+    AtomicFile file(path);
+    if (afterTempCreated) {
+        afterTempCreated(file.tempPath());
     }
+    writeAll(file, prepared, index);
+    file.commit();
 }
 
 }  // namespace detail

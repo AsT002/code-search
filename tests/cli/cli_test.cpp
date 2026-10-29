@@ -16,8 +16,14 @@ namespace {
 using testing::TempDir;
 using testing::TempRepo;
 
-ProcessResult codeSearch(const std::vector<std::string>& args) {
-    return runProcess(CODE_SEARCH_BIN, args);
+// Runs the program with its data folder at `home`. The default is a folder
+// that doesn't exist, so a test can never touch the real ~/.code-search.
+ProcessResult codeSearch(const std::vector<std::string>& args,
+                         const std::filesystem::path& home = "/nonexistent/code-search-home",
+                         const std::vector<std::string>& extraEnv = {}) {
+    std::vector<std::string> env = {"CODE_SEARCH_HOME=" + home.string()};
+    env.insert(env.end(), extraEnv.begin(), extraEnv.end());
+    return runProcess(CODE_SEARCH_BIN, args, env);
 }
 
 ProcessResult searchIn(const TempRepo& repo, std::vector<std::string> args) {
@@ -91,18 +97,24 @@ TEST(Cli, BadArgumentsPrintUsage) {
     const std::vector<std::vector<std::string>> cases = {
         {},
         {"search"},
-        {"search", "text"},                              // no --path
         {"search", "--path"},                            // --path without a value
+        {"search", "--repo"},                            // --repo without a value
         {"search", "--path", ".", "one", "two"},         // two texts
         {"search", "--path", ".", "--", "a", "b"},       // more after "--" text
         {"search", "--path", ".", "--", "a", "--path"},  // same
         {"search", "--path", ".", "--"},                 // nothing after "--"
-        {"search", "--path", ".", "--index", "x", "a"},  // both --path and --index
-        {"search", "--index", "x"},                      // no text
-        {"index", "--path", "."},                        // no --out
-        {"index", "--out", "x"},                         // no --path
-        {"index", "--path", ".", "--out"},               // --out without a value
-        {"index", "--path", ".", "--out", "x", "--z", "y"},
+        {"search", "--path", ".", "--repo", "x", "a"},   // both --path and --repo
+        {"search", "--index", "x", "a"},                 // gone in M4
+        {"index", "--path", ".", "--out", "x"},          // gone in M4
+        {"add"},
+        {"add", "--name", "x"},                      // no source
+        {"add", ".", "--name"},                      // --name without a value
+        {"add", ".", "other"},                       // two sources
+        {"add", ".", "--name", "a", "--name", "b"},  // two names
+        {"add", "--bogus"},
+        {"list", "x"},
+        {"remove"},
+        {"remove", "a", "b"},
         {"verify"},
         {"verify", "a", "b"},
         {"unknown"},
@@ -170,96 +182,179 @@ TEST(CliErrors, ClosedOutputIsAnError) {
         << search.errorOutput();
 }
 
-// ---- Saved index files ----
+// ---- Added repos ----
 
-// Saves the repo's index to `file`.
-void indexTo(const TempRepo& repo, const std::string& file) {
+ProcessResult addRepo(const TempDir& home, const TempRepo& repo, const std::string& name) {
     const ProcessResult result =
-        codeSearch({"index", "--path", repo.dir().string(), "--out", file});
-    ASSERT_EQ(result.exitCode, 0) << result.err;
-    EXPECT_TRUE(contains(result.err, "indexed 3 files")) << result.err;
+        codeSearch({"add", repo.dir().string(), "--name", name}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    return result;
 }
 
-ProcessResult searchFile(const std::string& file, std::vector<std::string> args) {
-    args.insert(args.begin(), {"search", "--index", file});
-    return codeSearch(args);
+// `text` with `prefix` put before every line.
+std::string prefixLines(const std::string& text, const std::string& prefix) {
+    std::string result;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        const std::size_t end = text.find('\n', start) + 1;
+        result += prefix + text.substr(start, end - start);
+        start = end;
+    }
+    return result;
 }
 
-TEST(CliIndex, SavedIndexGivesTheSameOutput) {
+TEST(CliRepos, AddSearchListRemove) {
     TempRepo repo;
     fillRepo(repo);
-    const TempDir dir;
-    const std::string file = dir.file("repo.idx").string();
-    indexTo(repo, file);
+    const TempDir home;
 
+    const ProcessResult added = addRepo(home, repo, "demo");
+    EXPECT_TRUE(contains(added.out, "added demo")) << added.out;
+    EXPECT_TRUE(contains(added.err, "indexed 3 files")) << added.err;
+
+    const std::string path = std::filesystem::canonical(repo.dir()).string();
+    ProcessResult result = codeSearch({"list"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_TRUE(result.out.starts_with("demo  local   ")) << result.out;
+    EXPECT_TRUE(result.out.ends_with("  " + path + "\n")) << result.out;
+
+    // Searching the added repo prints what --path prints, with "demo:" in front.
     const std::vector<std::vector<std::string>> cases = {
         {"target"}, {"-l", "target"}, {"--case-sensitive", "Target"}, {"--", "->"}, {"none here"},
     };
     for (const std::vector<std::string>& args : cases) {
         const ProcessResult fromRepo = searchIn(repo, args);
-        const ProcessResult fromFile = searchFile(file, args);
-        EXPECT_EQ(fromFile.exitCode, fromRepo.exitCode) << ::testing::PrintToString(args);
-        EXPECT_EQ(fromFile.out, fromRepo.out) << ::testing::PrintToString(args);
-        EXPECT_EQ(fromFile.err, "");  // nothing gets indexed, so no report
+        std::vector<std::string> searchArgs = {"search"};
+        searchArgs.insert(searchArgs.end(), args.begin(), args.end());
+        const ProcessResult fromWorkspace = codeSearch(searchArgs, home.dir());
+        EXPECT_EQ(fromWorkspace.exitCode, fromRepo.exitCode) << ::testing::PrintToString(args);
+        EXPECT_EQ(fromWorkspace.out, prefixLines(fromRepo.out, "demo:"))
+            << ::testing::PrintToString(args);
+        EXPECT_EQ(fromWorkspace.err, "");  // nothing gets indexed, so no report
+
+        searchArgs.insert(searchArgs.begin() + 1, {"--repo", "demo"});
+        EXPECT_EQ(codeSearch(searchArgs, home.dir()).out, fromWorkspace.out);
     }
+
+    result = codeSearch({"remove", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "removed demo (" + path + " itself was not touched)\n");
+    EXPECT_TRUE(std::filesystem::exists(repo.dir() / "a.txt"));
+
+    result = codeSearch({"list"}, home.dir());
+    EXPECT_EQ(result.out, "");
+    EXPECT_TRUE(contains(result.err, "no repos added yet")) << result.err;
+    result = codeSearch({"search", "target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "no repos added yet")) << result.err;
 }
 
-TEST(CliIndex, SavedIndexKeepsItsCommit) {
+TEST(CliRepos, SearchesEveryRepoInNameOrder) {
+    TempRepo first;
+    first.write("x.txt", "needle\n");
+    first.commit();
+    TempRepo second;
+    second.write("y.txt", "needle\n");
+    second.commit();
+    const TempDir home;
+    addRepo(home, second, "zeta");
+    addRepo(home, first, "alpha");
+
+    EXPECT_EQ(codeSearch({"search", "-l", "needle"}, home.dir()).out, "alpha:x.txt\nzeta:y.txt\n");
+    EXPECT_EQ(codeSearch({"search", "--repo", "zeta", "-l", "needle"}, home.dir()).out,
+              "zeta:y.txt\n");
+    const ProcessResult unknown = codeSearch({"search", "--repo", "nope", "needle"}, home.dir());
+    EXPECT_EQ(unknown.exitCode, 2);
+    EXPECT_TRUE(contains(unknown.err, "no repo named nope")) << unknown.err;
+}
+
+TEST(CliRepos, IndexKeepsItsCommit) {
     TempRepo repo;
     fillRepo(repo);
-    const TempDir dir;
-    const std::string file = dir.file("repo.idx").string();
-    indexTo(repo, file);
+    const TempDir home;
+    addRepo(home, repo, "demo");
 
     repo.write("c.txt", "new target\n");
     repo.commit();
-    EXPECT_EQ(searchFile(file, {"-l", "target"}).out, "a.txt\nflags.sh\n");
-    EXPECT_EQ(searchIn(repo, {"-l", "target"}).out, "a.txt\nc.txt\nflags.sh\n");
+    EXPECT_EQ(codeSearch({"search", "-l", "target"}, home.dir()).out,
+              "demo:a.txt\ndemo:flags.sh\n");  // until `update` arrives in M5
 }
 
-TEST(CliIndex, VerifyChecksTheFile) {
+TEST(CliRepos, VerifyChecksTheIndex) {
     TempRepo repo;
     fillRepo(repo);
-    const TempDir dir;
-    const std::filesystem::path file = dir.file("repo.idx");
-    indexTo(repo, file.string());
+    const TempDir home;
+    addRepo(home, repo, "demo");
 
-    ProcessResult result = codeSearch({"verify", file.string()});
+    ProcessResult result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 0) << result.err;
-    EXPECT_TRUE(contains(result.out, "ok, 3 files")) << result.out;
+    EXPECT_TRUE(contains(result.out, "demo: ok, 3 files")) << result.out;
 
     // Change one byte of a file's content. Opening still works, so search
     // can't tell, but verify can.
+    const std::filesystem::directory_iterator files(home.dir() / "indexes");
+    const std::filesystem::path file = files->path();
     std::string bytes = testing::readFile(file);
     bytes[bytes.find("second Target") + 2] = 'X';
     testing::writeFile(file, bytes);
-    result = codeSearch({"verify", file.string()});
+    result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 1);
     EXPECT_TRUE(contains(result.err, "index file is damaged")) << result.err;
 
     // A file that isn't an index at all.
     testing::writeFile(file, "hello");
-    result = codeSearch({"verify", file.string()});
+    result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 1);
     EXPECT_TRUE(contains(result.err, "not an index file")) << result.err;
-    result = codeSearch({"search", "--index", file.string(), "x"});
+    result = codeSearch({"search", "x"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
-    EXPECT_TRUE(contains(result.err, "not an index file")) << result.err;
+    EXPECT_TRUE(contains(result.err, "demo: not an index file")) << result.err;
 
     // A file that doesn't exist can't be checked at all.
-    result = codeSearch({"verify", dir.file("missing.idx").string()});
+    std::filesystem::remove(file);
+    result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "could not open")) << result.err;
+    result = codeSearch({"verify", "nope"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
 }
 
-TEST(CliIndex, EmptyRepoWritesNothing) {
-    const TempRepo repo;
-    const TempDir dir;
+TEST(CliRepos, AddErrors) {
+    const TempDir home;
+    const TempDir notARepo;
+    ProcessResult result = codeSearch({"add", notARepo.dir().string()}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "not a Git repository")) << result.err;
+
+    result = codeSearch({"add", "https://example.com/a/b"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "only https://github.com/")) << result.err;
+
+    result = codeSearch({"remove", "nope"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
+}
+
+TEST(CliRepos, MissingGitIsAClearError) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir home;
     const ProcessResult result =
-        codeSearch({"index", "--path", repo.dir().string(), "--out", dir.file("x.idx").string()});
-    EXPECT_EQ(result.exitCode, 1);
-    EXPECT_TRUE(contains(result.err, "no commits")) << result.err;
-    EXPECT_FALSE(std::filesystem::exists(dir.file("x.idx")));
+        codeSearch({"add", repo.dir().string()}, home.dir(), {"PATH=/nonexistent"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "Is Git installed")) << result.err;
+}
+
+TEST(CliRepos, DataGoesInHomeByDefault) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir home;
+    // An empty CODE_SEARCH_HOME counts as not set.
+    const ProcessResult result = codeSearch({"add", repo.dir().string(), "--name", "demo"}, "",
+                                            {"HOME=" + home.dir().string()});
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(std::filesystem::exists(home.dir() / ".code-search" / "registry.json"));
 }
 
 TEST(CliErrors, Version) {

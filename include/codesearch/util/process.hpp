@@ -18,6 +18,13 @@ public:
     using std::runtime_error::runtime_error;  // reuse runtime_error's constructors
 };
 
+// Thrown when the program can't be started at all, usually because it isn't
+// installed or isn't on PATH.
+class ProcessStartError : public ProcessError {
+public:
+    using ProcessError::ProcessError;
+};
+
 // A running program that we talk to through pipes.
 //
 // The program is started directly with an argument list, never through a
@@ -27,7 +34,10 @@ public:
 class Process {
 public:
     // `program` is found through PATH. `args` don't include the program name.
-    Process(const std::string& program, const std::vector<std::string>& args);
+    // The program gets our environment variables, plus `extraEnv`: entries
+    // like "NAME=value" that are added or replace ours.
+    Process(const std::string& program, const std::vector<std::string>& args,
+            const std::vector<std::string>& extraEnv = {});
     ~Process();
 
     // One process, one owner: no copying or moving.
@@ -83,6 +93,7 @@ struct ProcessResult {
 };
 
 // Runs a program with no input, waits for it and returns everything it printed.
-ProcessResult runProcess(const std::string& program, const std::vector<std::string>& args);
+ProcessResult runProcess(const std::string& program, const std::vector<std::string>& args,
+                         const std::vector<std::string>& extraEnv = {});
 
 }  // namespace codesearch

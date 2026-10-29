@@ -32,39 +32,44 @@ Other presets:
 
 All presets treat compiler warnings as errors.
 
-## Search a repo
-
-With `--path`, `search` indexes the repo's current commit in memory every time
-it runs. To skip that, see "Save an index" below.
+## Add repos and search them
 
 ```sh
-./build/debug/code-search search --path ~/projects/backend "authenticate"
-./build/debug/code-search search --path . -l "TODO"              # file names only
-./build/debug/code-search search --path . --case-sensitive "Foo"
-./build/debug/code-search search --path . -- "--verbose"        # text starting with -
+./build/debug/code-search add ~/projects/backend               # a local Git repo
+./build/debug/code-search add https://github.com/example/frontend
+./build/debug/code-search add ~/projects/backend --name my-backend
+./build/debug/code-search list
+./build/debug/code-search search "authenticate"                # every added repo
+./build/debug/code-search search --repo my-backend "authenticate"
+./build/debug/code-search search -l "TODO"                     # file names only
+./build/debug/code-search search --case-sensitive "Foo"
+./build/debug/code-search search -- "--verbose"                # text starting with -
+./build/debug/code-search verify my-backend                    # full check of the index
+./build/debug/code-search remove my-backend                    # never deletes your code
 ```
 
+Results look like `my-backend:src/auth.ts:12:14:export function authenticate`.
 Exit codes work like grep: 0 found something, 1 found nothing, 2 error.
+`verify` exits with 0 if the index is fine, 1 if it is damaged, and 2 if it
+can't be read at all.
 
-It searches the last commit, not uncommitted changes. Binary files, files over
-1 MB, symlinks, submodules, Git LFS pointers and minified JS and CSS are
-skipped. A summary of what was skipped goes to stderr.
+`add` indexes the repo's last commit, not uncommitted changes. New commits show
+up only after an update, which arrives in M5. For now, `remove` and `add` again.
+GitHub repos are cloned without a working copy into code-search's own folder.
+Only `https://github.com/<owner>/<repo>` URLs are accepted.
 
-## Save an index
+Binary files, files over 1 MB, symlinks, submodules, Git LFS pointers and
+minified JS and CSS are skipped. `add` prints a summary of what was skipped.
 
-Indexing every time is slow on big repos. You can save the index to a file and
-search that instead. Saved indexes get managed for you in M4.
+Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. Only
+one `add` or `remove` runs at a time; a second one waits. Searches never wait.
+
+To search a repo without adding it, use `--path`. It indexes the repo in memory
+every time, which is slow on big repos:
 
 ```sh
-./build/debug/code-search index --path ~/projects/backend --out backend.idx
-./build/debug/code-search search --index backend.idx "authenticate"
-./build/debug/code-search verify backend.idx    # full check of the file
+./build/debug/code-search search --path ~/projects/other "authenticate"
 ```
-
-The file holds one commit. Searching it doesn't look at the repo, so new commits
-show up only after you run `index` again. If `index` fails, any old file at
-`--out` is kept as it was. `verify` exits with 0 if the file is fine, 1 if it is
-damaged, and 2 if it can't be read at all.
 
 ## Formatting
 

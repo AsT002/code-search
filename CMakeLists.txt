@@ -22,9 +22,12 @@ if(CODESEARCH_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+include(Dependencies)  # each one is only fetched when something needs it
+
 # Core library
 add_library(codesearch_core
   src/app/index_commit.cpp
+  src/app/repo_manager.cpp
   src/git/git_repo.cpp
   src/git/git_runner.cpp
   src/index/file_filter.cpp
@@ -35,10 +38,16 @@ add_library(codesearch_core
   src/index/shard_writer.cpp
   src/index/trigram.cpp
   src/query/planner.cpp
+  src/repo/github_url.cpp
+  src/repo/publisher.cpp
+  src/repo/registry.cpp
+  src/repo/workspace.cpp
   src/search/candidates.cpp
   src/search/evaluator.cpp
   src/search/literal_matcher.cpp
   src/search/searcher.cpp
+  src/util/atomic_file.cpp
+  src/util/file_lock.cpp
   src/util/mmap_file.cpp
   src/util/object_id.cpp
   src/util/process.cpp
@@ -48,7 +57,7 @@ add_library(codesearch_core
 )
 target_include_directories(codesearch_core PUBLIC include)
 find_package(Threads REQUIRED)
-target_link_libraries(codesearch_core PUBLIC Threads::Threads)
+target_link_libraries(codesearch_core PUBLIC Threads::Threads PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(codesearch_core PRIVATE CODESEARCH_VERSION="${PROJECT_VERSION}")
 codesearch_set_warnings(codesearch_core)
 codesearch_set_clang_tidy(codesearch_core)
@@ -58,10 +67,6 @@ add_executable(code-search cli/main.cpp)
 target_link_libraries(code-search PRIVATE codesearch_core)
 codesearch_set_warnings(code-search)
 codesearch_set_clang_tidy(code-search)
-
-if(CODESEARCH_BUILD_TESTS OR CODESEARCH_BUILD_BENCHMARKS)
-  include(Dependencies)
-endif()
 
 if(CODESEARCH_BUILD_TESTS)
   enable_testing()

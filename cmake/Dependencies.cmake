@@ -2,6 +2,16 @@ include(FetchContent)
 
 # Pinned by version and hash. Bump both together.
 
+# JSON for the registry file. Header-only. This archive holds just the
+# headers and CMake files, not the library's tests and docs.
+FetchContent_Declare(json
+  URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+  URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SYSTEM
+)
+FetchContent_MakeAvailable(json)
+
 if(CODESEARCH_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   set(BUILD_GMOCK ON CACHE BOOL "" FORCE)

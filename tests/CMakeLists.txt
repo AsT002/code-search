@@ -5,21 +5,27 @@ add_executable(codesearch_tests
   differential/literal_search_test.cpp
   fuzz/shard_reader_fuzz_test.cpp
   integration/index_commit_test.cpp
+  integration/repo_manager_test.cpp
   support/brute_force.cpp
   support/fake_git.cpp
   support/temp_dir.cpp
   support/temp_repo.cpp
+  unit/atomic_file_test.cpp
   unit/candidates_test.cpp
   unit/endian_test.cpp
   unit/file_filter_test.cpp
+  unit/file_lock_test.cpp
   unit/git_errors_test.cpp
   unit/git_test.cpp
+  unit/github_url_test.cpp
   unit/matcher_test.cpp
   unit/mmap_file_test.cpp
   unit/object_id_test.cpp
   unit/planner_test.cpp
   unit/posting_cursor_test.cpp
   unit/process_test.cpp
+  unit/publisher_test.cpp
+  unit/registry_test.cpp
   unit/searcher_test.cpp
   unit/shard_test.cpp
   unit/trigram_test.cpp

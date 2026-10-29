@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <csignal>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -8,9 +10,10 @@
 #include <vector>
 
 #include "codesearch/app/index_commit.hpp"
+#include "codesearch/app/repo_manager.hpp"
+#include "codesearch/git/git_runner.hpp"
 #include "codesearch/index/index_file_error.hpp"
 #include "codesearch/index/shard_reader.hpp"
-#include "codesearch/index/shard_writer.hpp"
 #include "codesearch/search/searcher.hpp"
 #include "codesearch/version.hpp"
 
@@ -20,20 +23,24 @@ using namespace codesearch;
 
 void printUsage(std::ostream& out) {
     out << "usage:\n"
-           "  code-search search --path <repo> [--case-sensitive] [-l] [--] <text>\n"
-           "  code-search search --index <file> [--case-sensitive] [-l] [--] <text>\n"
-           "\n"
-           "Use -- before text that starts with a dash, like: -- --flag\n"
-           "\n"
-           "  code-search index --path <repo> --out <file>\n"
-           "  code-search verify <file>\n"
+           "  code-search add <folder | https://github.com/<owner>/<repo>> [--name <name>]\n"
+           "  code-search list\n"
+           "  code-search remove <name>\n"
+           "  code-search search [--repo <name>] [--case-sensitive] [-l] [--] <text>\n"
+           "  code-search search --path <folder> [--case-sensitive] [-l] [--] <text>\n"
+           "  code-search verify <name>\n"
            "  code-search --version\n"
-           "  code-search --help\n";
+           "  code-search --help\n"
+           "\n"
+           "search looks in every added repo, or only in --repo. With --path it\n"
+           "indexes a repo you haven't added, in memory, every time.\n"
+           "Use -- before text that starts with a dash, like: -- --flag\n"
+           "Data is kept in ~/.code-search, or in $CODE_SEARCH_HOME if it's set.\n";
 }
 
 struct SearchArgs {
-    std::string repoPath;   // search a repo, indexing it first
-    std::string indexPath;  // or search a saved index file
+    std::string repoName;  // only this added repo; empty means all of them
+    std::string repoPath;  // or a repo that isn't added, indexed in memory
     std::string text;
     bool caseSensitive = false;
     bool filesOnly = false;  // -l: print only the paths of matching files
@@ -45,12 +52,12 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
     bool haveText = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
-        if (arg == "--path" && i + 1 < args.size()) {
+        if (arg == "--repo" && i + 1 < args.size()) {
+            ++i;
+            result.repoName = args[i];
+        } else if (arg == "--path" && i + 1 < args.size()) {
             ++i;
             result.repoPath = args[i];
-        } else if (arg == "--index" && i + 1 < args.size()) {
-            ++i;
-            result.indexPath = args[i];
         } else if (arg == "--case-sensitive") {
             result.caseSensitive = true;
         } else if (arg == "-l") {
@@ -67,32 +74,33 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
             return std::nullopt;
         }
     }
-    // Exactly one of --path and --index.
-    if (result.repoPath.empty() == result.indexPath.empty() || !haveText) {
+    // --repo and --path can't be used together.
+    if ((!result.repoName.empty() && !result.repoPath.empty()) || !haveText) {
         return std::nullopt;
     }
     return result;
 }
 
-struct IndexArgs {
-    std::string repoPath;
-    std::string outPath;
+struct AddArgs {
+    std::string source;
+    std::string name;
 };
 
-// Reads the arguments after "index".
-std::optional<IndexArgs> parseIndexArgs(std::span<char*> args) {
-    IndexArgs result;
-    for (std::size_t i = 0; i + 1 < args.size(); i += 2) {
-        const std::string_view flag = args[i];
-        if (flag == "--path") {
-            result.repoPath = args[i + 1];
-        } else if (flag == "--out") {
-            result.outPath = args[i + 1];
+// Reads the arguments after "add": a source, and maybe --name <name>.
+std::optional<AddArgs> parseAddArgs(std::span<char*> args) {
+    AddArgs result;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string_view arg = args[i];
+        if (arg == "--name" && i + 1 < args.size() && result.name.empty()) {
+            ++i;
+            result.name = args[i];
+        } else if (result.source.empty() && !arg.starts_with('-') && !arg.empty()) {
+            result.source = arg;
         } else {
             return std::nullopt;
         }
     }
-    if (args.size() % 2 != 0 || result.repoPath.empty() || result.outPath.empty()) {
+    if (result.source.empty()) {
         return std::nullopt;
     }
     return result;
@@ -146,7 +154,9 @@ std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& fi
     return result;
 }
 
-int printResults(const IndexReader& index, const SearchArgs& args) {
+// Prints the matches in one index. `prefix` goes before each path, like
+// "my-backend:" when searching added repos. Returns true if anything matched.
+bool printResults(const IndexReader& index, const SearchArgs& args, const std::string& prefix) {
     SearchOptions options;
     options.caseSensitive = args.caseSensitive;
     const SearchResults results = search(index, literal(args.text), options);
@@ -156,63 +166,115 @@ int printResults(const IndexReader& index, const SearchArgs& args) {
             break;  // output failed, so the rest would be lost too
         }
         if (args.filesOnly) {
-            std::cout << file.path << '\n';
+            std::cout << prefix << file.path << '\n';
             continue;
         }
-        index.withContent(file.doc, [&file](std::string_view content) {
+        index.withContent(file.doc, [&](std::string_view content) {
             std::size_t lastLine = 0;
             for (const Match& match : file.matches) {
                 if (match.line == lastLine) {
                     continue;  // print each line once, even with several matches on it
                 }
                 lastLine = match.line;
-                std::cout << file.path << ':' << match.line << ':' << match.column << ':'
+                std::cout << prefix << file.path << ':' << match.line << ':' << match.column << ':'
                           << lineAt(content, match.bytes.begin) << '\n';
             }
         });
     }
-    return results.files.empty() ? 1 : 0;  // like grep: 1 means nothing found
+    return !results.files.empty();
 }
 
 int runSearch(const SearchArgs& args) {
-    if (!args.indexPath.empty()) {
-        const ShardReader reader(args.indexPath);
-        return printResults(reader, args);
+    if (!args.repoPath.empty()) {
+        const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, FileFilter());
+        if (!repo.has_value()) {
+            return 1;
+        }
+        return printResults(repo->built.index, args, "") ? 0 : 1;
     }
-    const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, FileFilter());
-    if (!repo.has_value()) {
-        return 1;
+
+    const std::vector<OpenRepo> repos =
+        openRepos(Workspace(Workspace::defaultRoot()), args.repoName);
+    if (repos.empty()) {
+        std::cerr << "code-search: no repos added yet. Add one with: code-search add <folder>\n";
+        return 2;
     }
-    return printResults(repo->built.index, args);
+    bool found = false;
+    for (const OpenRepo& repo : repos) {
+        found = printResults(*repo.index, args, repo.name + ":") || found;
+    }
+    return found ? 0 : 1;  // like grep: 1 means nothing found
 }
 
-int runIndex(const IndexArgs& args) {
-    const FileFilter filter;
-    const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, filter);
-    if (!repo.has_value()) {
-        return 1;
-    }
-    const ShardInfo info{
-        .commit = repo->commit,
-        .policyVersion = kPolicyVersion,
-        .configFingerprint = configFingerprint(filter.config()),
-    };
-    writeShard(repo->built.index, info, args.outPath);
-    std::cerr << "wrote " << args.outPath << '\n';
+RepoManager makeManager() {
+    RepoManager manager(Workspace(Workspace::defaultRoot()), cloneShallow);
+    manager.setOnWait([] {
+        std::cerr << "code-search: waiting for another code-search command to finish...\n";
+    });
+    return manager;
+}
+
+std::string_view sourceName(RepoSource source) {
+    return source == RepoSource::Local ? "local" : "github";
+}
+
+int runAdd(const AddArgs& args) {
+    const AddResult result = makeManager().add(args.source, args.name);
+    printReport(result.repo.index.commit, result.report);
+    std::cout << "added " << result.repo.name << " (" << result.repo.location << ")\n";
     return 0;
 }
 
-// Exit codes: 0 the file is fine, 1 it is damaged, 2 it can't be read at all.
-int runVerify(const std::string& path) {
+int runList() {
+    const Registry registry = loadRegistry(Workspace(Workspace::defaultRoot()));
+    if (registry.repos.empty()) {
+        std::cerr << "code-search: no repos added yet. Add one with: code-search add <folder>\n";
+        return 0;
+    }
+    std::size_t width = 0;
+    for (const RepoEntry& repo : registry.repos) {
+        width = std::max(width, repo.name.size());
+    }
+    constexpr std::size_t kShortCommit = 12;
+    for (const RepoEntry& repo : registry.repos) {
+        std::cout << repo.name << std::string(width - repo.name.size() + 2, ' ')
+                  << sourceName(repo.source) << (repo.source == RepoSource::Local ? "   " : "  ")
+                  << repo.index.commit.hex().substr(0, kShortCommit) << "  " << repo.location
+                  << '\n';
+    }
+    return 0;
+}
+
+int runRemove(const std::string& name) {
+    const RepoEntry removed = makeManager().remove(name);
+    std::cout << "removed " << removed.name;
+    if (removed.source == RepoSource::Local) {
+        std::cout << " (" << removed.location << " itself was not touched)";
+    }
+    std::cout << '\n';
+    return 0;
+}
+
+// Exit codes: 0 the index is fine, 1 it is damaged, 2 it can't be read at all.
+int runVerify(const std::string& name) {
+    const Workspace workspace(Workspace::defaultRoot());
+    const Registry registry = loadRegistry(workspace);
+    const RepoEntry* repo = registry.find(name);
+    if (repo == nullptr) {
+        std::cerr << "code-search: no repo named " << name << '\n';
+        return 2;
+    }
+    const std::filesystem::path path = workspace.indexesDir() / repo->index.file;
     try {
         const ShardReader reader(path);
         reader.verify();
-        std::cout << path << ": ok, " << reader.docCount() << " files, "
+        std::cout << name << ": ok, " << reader.docCount() << " files, "
                   << reader.header().trigramCount << " trigrams, commit " << reader.commit().hex()
                   << '\n';
         return 0;
     } catch (const IndexFileError& error) {
-        std::cerr << "code-search: " << path << ": " << error.what() << '\n';
+        std::cerr << "code-search: " << name << " (" << path.string() << "): " << error.what()
+                  << '\n';
         return 1;
     }
 }
@@ -230,25 +292,22 @@ int run(std::span<char*> args) {
         }
     }
 
-    if (args.size() >= 2 && std::string_view(args[1]) == "search") {
+    const std::string_view command = args.size() >= 2 ? args[1] : "";
+    if (command == "search") {
         const std::optional<SearchArgs> searchArgs = parseSearchArgs(args.subspan(2));
-        if (!searchArgs.has_value()) {
-            printUsage(std::cerr);
-            return 2;
+        if (searchArgs.has_value()) {
+            return runSearch(searchArgs.value());
         }
-        return runSearch(searchArgs.value());
-    }
-
-    if (args.size() >= 2 && std::string_view(args[1]) == "index") {
-        const std::optional<IndexArgs> indexArgs = parseIndexArgs(args.subspan(2));
-        if (!indexArgs.has_value()) {
-            printUsage(std::cerr);
-            return 2;
+    } else if (command == "add") {
+        const std::optional<AddArgs> addArgs = parseAddArgs(args.subspan(2));
+        if (addArgs.has_value()) {
+            return runAdd(addArgs.value());
         }
-        return runIndex(indexArgs.value());
-    }
-
-    if (args.size() == 3 && std::string_view(args[1]) == "verify") {
+    } else if (command == "list" && args.size() == 2) {
+        return runList();
+    } else if (command == "remove" && args.size() == 3) {
+        return runRemove(args[2]);
+    } else if (command == "verify" && args.size() == 3) {
         return runVerify(args[2]);
     }
 

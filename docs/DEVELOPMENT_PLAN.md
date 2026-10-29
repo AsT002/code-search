@@ -129,6 +129,28 @@ find nothing.
 
 ## M4: Managing repos
 
+Status: done. Notes:
+
+- The temporary `index` command and `search --index` are gone. `search --path`
+  stays, for searching a repo without adding it. `verify` takes a repo name.
+- Data lives in `$CODE_SEARCH_HOME`, or `~/.code-search` if that isn't set. The
+  tests always set it, so they never touch the real one.
+- The check before publishing opens the new file (header, commit, file count).
+  The full `verify` takes about as long as the build, so it stays a command.
+- `add` refuses a folder with no commits. The registry always points to a real
+  index, so it never has to describe an empty one.
+- Kill tests fork the test process and stop the child with `_exit` right after
+  each publishing step, then check the registry and every index it names, and
+  that the next cleanup leaves only what the registry uses.
+- GitHub tests use a fake cloner that copies a local repo, so they don't need
+  the network. `git clone` runs with `GIT_TERMINAL_PROMPT=0`, so a private or
+  missing repo fails instead of asking for a password.
+- When a search finds that an index file was deleted after it read the
+  registry, it reads the registry again and retries once. There's no test that
+  forces this race yet.
+- The registry uses nlohmann/json 3.12.0, pinned by hash like the other
+  dependencies.
+
 - `Workspace` (`~/.code-search` with `indexes/`, `repos/` and `tmp/`), internal
   repo IDs for every path, `FileLock`.
 - `Registry` saved as JSON through `RegistryStore`. It names the current index

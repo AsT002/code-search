@@ -111,22 +111,50 @@ int take(int& fd) {
     return taken;
 }
 
+// The environment for the child: `extraEnv`, then each of ours whose name
+// isn't in `extraEnv`. Entries look like "NAME=value".
+std::vector<std::string> childEnvironment(const std::vector<std::string>& extraEnv) {
+    std::vector<std::string> result = extraEnv;
+    for (char* const* entry = environ; *entry != nullptr;
+         ++entry) {  // NOLINT(*-pointer-arithmetic)
+        const std::string_view ours = *entry;
+        const std::string_view name = ours.substr(0, ours.find('=') + 1);  // with the '='
+        const bool replaced =
+            std::any_of(extraEnv.begin(), extraEnv.end(), [&](const std::string& e) {
+                return e.starts_with(name);
+            });
+        if (!replaced) {
+            result.emplace_back(ours);
+        }
+    }
+    return result;
+}
+
+// A C-style list of char pointers ending in nullptr, as posix_spawn wants.
+// The pointers point into `texts`, which must outlive the list.
+std::vector<char*> cList(std::vector<std::string>& texts) {
+    std::vector<char*> list;
+    list.reserve(texts.size() + 1);
+    for (std::string& text : texts) {
+        list.push_back(text.data());
+    }
+    list.push_back(nullptr);
+    return list;
+}
+
 }  // namespace
 
-Process::Process(const std::string& program, const std::vector<std::string>& args)
+Process::Process(const std::string& program, const std::vector<std::string>& args,
+                 const std::vector<std::string>& extraEnv)
     : program_(program) {
     std::vector<std::string> argvText = {program};
     argvText.reserve(1 + args.size());
     for (const std::string& arg : args) {
         argvText.push_back(arg);
     }
-    // posix_spawn wants a C-style list of char pointers ending in nullptr.
-    std::vector<char*> argv;
-    argv.reserve(argvText.size() + 1);
-    for (std::string& arg : argvText) {
-        argv.push_back(arg.data());
-    }
-    argv.push_back(nullptr);
+    std::vector<char*> argv = cList(argvText);
+    std::vector<std::string> envText = childEnvironment(extraEnv);
+    std::vector<char*> envp = cList(envText);
 
     Pipe in;
     Pipe out;
@@ -155,11 +183,11 @@ Process::Process(const std::string& program, const std::vector<std::string>& arg
 
     // posix_spawnp finds the program through PATH, like a shell would.
     const int result =
-        ::posix_spawnp(&pid_, program.c_str(), &actions, &attributes, argv.data(), environ);
+        ::posix_spawnp(&pid_, program.c_str(), &actions, &attributes, argv.data(), envp.data());
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     if (result != 0) {
-        throw ProcessError("could not start " + program + ": " + errorText(result));
+        throw ProcessStartError("could not start " + program + ": " + errorText(result));
     }
 
     // Keep our ends. The child's ends are closed when the Pipes go away below.
@@ -304,8 +332,9 @@ int Process::wait() {
     return exitCode_;
 }
 
-ProcessResult runProcess(const std::string& program, const std::vector<std::string>& args) {
-    Process process(program, args);
+ProcessResult runProcess(const std::string& program, const std::vector<std::string>& args,
+                         const std::vector<std::string>& extraEnv) {
+    Process process(program, args, extraEnv);
     process.closeInput();
     ProcessResult result;
     result.out = process.readAll();

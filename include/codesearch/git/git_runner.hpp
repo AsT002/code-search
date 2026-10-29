@@ -21,7 +21,14 @@ using GitResult = ProcessResult;  // another name for the same type
 std::vector<std::string> gitArgs(const std::filesystem::path& dir,
                                  const std::vector<std::string>& args);
 
-// Runs `git -C <dir> <args...>`, waits for it and returns everything it printed.
+// Runs `git -C <dir> <args...>`, waits for it and returns everything it
+// printed. Throws GitError if git can't be started.
 GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string>& args);
+
+// Makes a bare, shallow clone of `url`'s default branch in `dest`, with no
+// tags: git clone --bare --depth 1 --single-branch --no-tags. Git is told
+// never to ask for a password, so a private or missing repo fails instead of
+// waiting. Throws GitError on failure. Only pass URLs you've checked.
+void cloneShallow(const std::string& url, const std::filesystem::path& dest);
 
 }  // namespace codesearch

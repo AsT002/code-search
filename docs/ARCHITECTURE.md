@@ -64,12 +64,12 @@ test and benchmark the core without Git.
 | Module    | Job | Main types |
 |-----------|-----|------------|
 | `git/`    | Run Git without a shell. Clone, fetch, look up a commit ID, list files, read file contents by ID | `GitRunner`, `GitRepo`, `BlobStream` |
-| `repo/`   | Workspace folders, registry, publishing new index files, cleanup, locking | `Workspace`, `Registry`, `RegistryStore`, `RepoId`, `Publisher` |
+| `repo/`   | Workspace folders, registry, publishing new index files, cleanup, locking | `Workspace`, `Registry`, `RegistryStore`, publishing steps (`writeToTmp`, `moveIntoIndexes`, `cleanUp`) |
 | `index/`  | Decide which files to index, extract trigrams, write and read index files | `FileFilter`, `IndexBuilder`, `ShardWriter`, `ShardReader`, `PostingCursor` |
 | `query/`  | Parse a query into a tree and plan how to run it | `Parser`, `QueryNode`, `Planner`, `RepoSelection`, `TrigramQuery` |
 | `search/` | Find candidate files, check them, collect matches, sort and limit results | `Matcher`, `Evaluator`, `Searcher` |
 | `util/`   | Small shared helpers, and `ObjectId`, which both `git/` and `index/` use | `Process`, `MmapFile`, `ObjectId`, `AtomicFile`, `ThreadPool`, `FileLock` |
-| `app/`    | Tie the modules together | `RepoManager`, `SearchService` |
+| `app/`    | Tie the modules together | `RepoManager`, `openRepos`, later `SearchService` |
 
 ### Main interfaces
 
@@ -227,20 +227,27 @@ Each index stores two values that describe the rules used to build it:
 ├── registry.json            the repos and which index file is current for each
 ├── lock                     held during add, update, remove and cleanup
 ├── repos/                   clones we own (GitHub repos only)
-│   └── r_7f3a.git/          bare, shallow, one branch, no tags
+│   └── r_7f3a90b1.git/      bare, shallow, one branch, no tags
 ├── indexes/
-│   ├── r_1c2d-g0004.idx     current index for my-backend
-│   ├── r_7f3a-g0002.idx     current index for frontend
-│   └── r_7f3a-g0001.idx     old index, deleted once nothing points to it
+│   ├── r_1c2d4e5f-g0004.idx current index for my-backend
+│   ├── r_7f3a90b1-g0002.idx current index for frontend
+│   └── r_7f3a90b1-g0001.idx old index, deleted once nothing points to it
 └── tmp/                     builds in progress
 ```
 
-- Files and folders are named by internal IDs like `r_7f3a`. The name a user gives
+The folder is `$CODE_SEARCH_HOME` if that's set, otherwise `~/.code-search`.
+
+- Files and folders are named by internal IDs like `r_7f3a90b1` (8 random hex
+  digits). The name a user gives
   with `--name` is only a label in the registry and never becomes a path.
 - Local repos stay where they are. `remove` deletes the registry entry and index
   files, never the user's code.
 - Clones we own have no checked-out files. We read from Git's object store, so
   a checkout would only waste disk.
+- Repo names may use letters, digits, `.`, `_` and `-`, and can't start with `.`
+  or `-`. The default is the folder's or the GitHub repo's name.
+- A local repo's path is stored after following symlinks. Folders inside the
+  workspace can't be added.
 
 `registry.json`:
 
@@ -249,27 +256,31 @@ Each index stores two values that describe the rules used to build it:
   "version": 1,
   "repos": [
     {
-      "id": "r_1c2d", "name": "my-backend",
+      "id": "r_1c2d4e5f", "name": "my-backend",
       "source": "local", "path": "/Users/me/projects/backend",
-      "track": "HEAD",
-      "index": { "file": "r_1c2d-g0004.idx", "commit": "a1b2c3…",
+      "index": { "file": "r_1c2d4e5f-g0004.idx", "commit": "a1b2c3…",
                  "format_version": 1, "policy_version": 1,
-                 "config_fingerprint": "9e41…" }
+                 "config_fingerprint": "9e41c0d2a7b35f16" }
     },
     {
-      "id": "r_7f3a", "name": "frontend",
+      "id": "r_7f3a90b1", "name": "frontend",
       "source": "github", "url": "https://github.com/example/frontend",
-      "track": "remote-default-branch",
-      "index": { "file": "r_7f3a-g0002.idx", "commit": "d4e5f6…",
+      "index": { "file": "r_7f3a90b1-g0002.idx", "commit": "d4e5f6…",
                  "format_version": 1, "policy_version": 1,
-                 "config_fingerprint": "9e41…" }
+                 "config_fingerprint": "9e41c0d2a7b35f16" }
     }
   ]
 }
 ```
 
+Local repos follow `HEAD` and GitHub clones follow the remote's default branch,
+so the source says what to track. Loading checks every field: IDs, names, the
+index file name (which must be `<id>-g<number>.idx`, so it can never point
+outside `indexes/`), and that no ID or name is used twice. Any problem is an
+error naming the file; we never guess.
+
 The registry is accessed through a `RegistryStore` interface, so we can move it
-to SQLite later without changing other code.
+to SQLite later without changing other code. The JSON store uses nlohmann/json.
 
 ### Index file (`.idx`)
 
@@ -377,13 +388,18 @@ Without it, one process's cleanup could delete another process's file in `tmp/`,
 or a finished index before the registry points to it. Searches don't take this
 lock and keep working while a change runs.
 
-1. Take the lock.
-2. Build into `tmp/` under a unique name.
-3. Check the new file, fsync it, and rename it into `indexes/` with its final
-   name. Nothing points to it yet.
+1. Take the lock (`flock`, so it's released if the process dies). Clean up.
+2. Build into `tmp/`. The file is written with fsync before its final rename.
+3. Open the new file to check its header, commit and file count, and rename it
+   into `indexes/`. Nothing points to it yet.
 4. Write the new registry to a temp file, fsync it, and rename it over the old one.
-5. Delete index files the registry no longer points to, and anything left in
-   `tmp/`. Release the lock.
+5. Delete index files the registry no longer points to, clones of repos it
+   doesn't list, and anything in `tmp/`. Release the lock.
+
+If a step fails, the same cleanup runs right away against the registry on
+disk. Cleanup only deletes entries directly inside `tmp/`, `indexes/` and
+`repos/`, checks that after following symlinks, and deletes a symlink itself,
+never what it points to.
 
 Since `remove` can't run during a build, a build can't finish after a `remove` and
 bring the repo back.
@@ -627,13 +643,13 @@ code-search/
 ├── cmake/                      warnings, tools, pinned dependencies
 ├── include/codesearch/
 │   ├── git/        git_runner.hpp  git_repo.hpp
-│   ├── repo/       workspace.hpp  registry.hpp  publisher.hpp
+│   ├── repo/       workspace.hpp  registry.hpp  publisher.hpp  github_url.hpp
 │   ├── index/      trigram.hpp  file_filter.hpp  index_builder.hpp
 │   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp
 │               posting_cursor.hpp  index_file_error.hpp
 │   ├── query/      ast.hpp  parser.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     matcher.hpp  evaluator.hpp  searcher.hpp  result.hpp
-│   ├── app/        index_commit.hpp  repo_manager.hpp  search_service.hpp
+│   ├── app/        index_commit.hpp  repo_manager.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
 │                   object_id.hpp
 │                   thread_pool.hpp  file_lock.hpp
@@ -659,6 +675,7 @@ code-search add ~/projects/backend --name my-backend
 code-search list
 code-search search "authenticate"
 code-search search "authenticate" --repo my-backend
+code-search search --path ~/projects/other "authenticate"   # not added; indexed in memory
 code-search search 'auth lang:go -path:_test'
 code-search search '/auth(enticate|orize)/'
 code-search update my-backend
