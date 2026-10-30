@@ -8,6 +8,7 @@
 
 #include "../support/temp_dir.hpp"
 #include "../support/temp_repo.hpp"
+#include "codesearch/index/shard_format.hpp"
 #include "codesearch/util/process.hpp"
 
 namespace codesearch {
@@ -268,16 +269,40 @@ TEST(CliRepos, SearchesEveryRepoInNameOrder) {
     EXPECT_TRUE(contains(unknown.err, "no repo named nope")) << unknown.err;
 }
 
-TEST(CliRepos, IndexKeepsItsCommit) {
+TEST(CliRepos, UpdatePicksUpNewCommits) {
     TempRepo repo;
     fillRepo(repo);
     const TempDir home;
     addRepo(home, repo, "demo");
 
     repo.write("c.txt", "new target\n");
-    repo.commit();
+    const ObjectId commit = repo.commit();
+    // The index keeps the commit it was built from until an update.
     EXPECT_EQ(codeSearch({"search", "-l", "target"}, home.dir()).out,
-              "demo:a.txt\ndemo:flags.sh\n");  // until `update` arrives in M5
+              "demo:a.txt\ndemo:flags.sh\n");
+
+    ProcessResult result = codeSearch({"update", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "updated demo (new commit)\n");
+    EXPECT_TRUE(contains(result.err, "commit " + commit.hex() + ": indexed 4 files")) << result.err;
+    EXPECT_EQ(codeSearch({"search", "-l", "target"}, home.dir()).out,
+              "demo:a.txt\ndemo:c.txt\ndemo:flags.sh\n");
+
+    result = codeSearch({"update", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "demo is up to date (commit " + commit.hex() + ")\n");
+    EXPECT_EQ(result.err, "");
+
+    result = codeSearch({"update", "demo", "--rebuild"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "updated demo (asked to rebuild)\n");
+
+    result = codeSearch({"update", "nope"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
+    result = codeSearch({"update", "demo", "--force"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "usage:")) << result.err;
 }
 
 TEST(CliRepos, VerifyChecksTheIndex) {
@@ -300,6 +325,8 @@ TEST(CliRepos, VerifyChecksTheIndex) {
     result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 1);
     EXPECT_TRUE(contains(result.err, "index file is damaged")) << result.err;
+    EXPECT_TRUE(contains(result.err, "Rebuild it with: code-search update demo --rebuild"))
+        << result.err;
 
     // A file that isn't an index at all.
     testing::writeFile(file, "hello");
@@ -309,15 +336,51 @@ TEST(CliRepos, VerifyChecksTheIndex) {
     result = codeSearch({"search", "x"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "demo: not an index file")) << result.err;
+    EXPECT_TRUE(contains(result.err, "code-search update demo --rebuild")) << result.err;
 
-    // A file that doesn't exist can't be checked at all.
-    std::filesystem::remove(file);
+    // update notices the file doesn't open, and rebuilds it.
+    result = codeSearch({"update", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(contains(result.out, "updated demo (the index file can't be used")) << result.out;
+    EXPECT_EQ(codeSearch({"verify", "demo"}, home.dir()).exitCode, 0);
+
+    // A file that doesn't exist can't be checked at all. The update made a
+    // new file, so look up its name again.
+    std::filesystem::remove(std::filesystem::directory_iterator(home.dir() / "indexes")->path());
     result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "could not open")) << result.err;
     result = codeSearch({"verify", "nope"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
+}
+
+TEST(CliRepos, DamageFoundWhileSearchingNamesTheFix) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir home;
+    addRepo(home, repo, "demo");
+
+    // Fill the posting lists with junk. The header is fine, so the file
+    // opens; the damage only shows when a search reads a posting list.
+    const std::filesystem::path file =
+        std::filesystem::directory_iterator(home.dir() / "indexes")->path();
+    std::string bytes = testing::readFile(file);
+    const Section postings = decodeHeader(bytes).sections[kPostingsSection];
+    bytes.replace(postings.offset, postings.length, postings.length, '\xff');
+    testing::writeFile(file, bytes);
+
+    ProcessResult result = codeSearch({"search", "target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "demo: index file is damaged")) << result.err;
+    EXPECT_TRUE(contains(result.err, "code-search update demo --rebuild")) << result.err;
+
+    // The file still opens, so a plain update doesn't notice. --rebuild fixes it.
+    EXPECT_TRUE(contains(codeSearch({"update", "demo"}, home.dir()).out, "is up to date"));
+    result = codeSearch({"update", "demo", "--rebuild"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(codeSearch({"search", "-l", "target"}, home.dir()).out,
+              "demo:a.txt\ndemo:flags.sh\n");
 }
 
 TEST(CliRepos, AddErrors) {

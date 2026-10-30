@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../support/temp_dir.hpp"
 #include "../support/temp_repo.hpp"
 #include "codesearch/git/git_repo.hpp"
 #include "codesearch/git/git_runner.hpp"
@@ -13,6 +14,7 @@
 namespace codesearch {
 namespace {
 
+using testing::TempDir;
 using testing::TempRepo;
 
 constexpr std::string_view kSampleHex = "0123456789abcdef0123456789abcdef01234567";
@@ -182,6 +184,44 @@ TEST(BlobStream, HandlesMissingAndTooLarge) {
     const Blob small = blobs.read(entries[1].id, 1024);
     EXPECT_EQ(small.status, BlobStatus::Found);
     EXPECT_EQ(small.content, "small");
+}
+
+TEST(FetchLatest, FollowsTheRemoteEvenAfterAForcePush) {
+    TempRepo source;
+    source.write("a.txt", "one");
+    const ObjectId first = source.commit();
+    const TempDir dir;
+    const std::filesystem::path clone = dir.file("clone.git");
+    cloneShallow("file://" + source.dir().string(), clone);
+    EXPECT_EQ(GitRepo(clone).resolveHead(), first);
+
+    source.write("a.txt", "two");
+    const ObjectId second = source.commit();
+    fetchLatest(clone);
+    EXPECT_EQ(GitRepo(clone).resolveHead(), second);
+
+    // Rewrite history, like a force-push: the new commit doesn't follow `second`.
+    source.git({"reset", "--quiet", "--hard", first.hex()});
+    source.write("a.txt", "three");
+    const ObjectId rewritten = source.commit();
+    fetchLatest(clone);
+    EXPECT_EQ(GitRepo(clone).resolveHead(), rewritten);
+}
+
+TEST(FetchLatest, NeverTouchesARepoAroundTheFolder) {
+    // `outer` has a remote, so a fetch run in it would work and move its
+    // branch. A broken clone folder inside it must fail instead.
+    TempRepo other;
+    other.write("a.txt", "other");
+    other.commit();
+    TempRepo outer;
+    outer.write("a.txt", "outer");
+    const ObjectId head = outer.commit();
+    outer.git({"remote", "add", "origin", other.dir().string()});
+    std::filesystem::create_directories(outer.dir() / "clone.git");
+
+    EXPECT_THROW(fetchLatest(outer.dir() / "clone.git"), GitError);
+    EXPECT_EQ(GitRepo(outer.dir()).resolveHead(), head);
 }
 
 }  // namespace

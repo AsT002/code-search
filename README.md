@@ -44,6 +44,8 @@ All presets treat compiler warnings as errors.
 ./build/debug/code-search search -l "TODO"                     # file names only
 ./build/debug/code-search search --case-sensitive "Foo"
 ./build/debug/code-search search -- "--verbose"                # text starting with -
+./build/debug/code-search update my-backend                    # pick up new commits
+./build/debug/code-search update my-backend --rebuild          # build again anyway
 ./build/debug/code-search verify my-backend                    # full check of the index
 ./build/debug/code-search remove my-backend                    # never deletes your code
 ```
@@ -54,7 +56,11 @@ Exit codes work like grep: 0 found something, 1 found nothing, 2 error.
 can't be read at all.
 
 `add` indexes the repo's last commit, not uncommitted changes. New commits show
-up only after an update, which arrives in M5. For now, `remove` and `add` again.
+up after `update`. For a GitHub repo, `update` fetches the latest commit of its
+default branch first. If nothing changed, it does nothing. Changing a single
+file still rebuilds the whole index, which takes about 2 seconds for
+golang/go. If a search or `verify` finds a damaged index, it tells you to run
+`update <name> --rebuild`.
 GitHub repos are cloned without a working copy into code-search's own folder.
 Only `https://github.com/<owner>/<repo>` URLs are accepted.
 
@@ -62,7 +68,7 @@ Binary files, files over 1 MB, symlinks, submodules, Git LFS pointers and
 minified JS and CSS are skipped. `add` prints a summary of what was skipped.
 
 Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. Only
-one `add` or `remove` runs at a time; a second one waits. Searches never wait.
+one `add`, `update` or `remove` runs at a time; a second one waits. Searches never wait.
 
 To search a repo without adding it, use `--path`. It indexes the repo in memory
 every time, which is slow on big repos:

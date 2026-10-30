@@ -23,7 +23,13 @@ struct AddResult {
     IngestReport report;
 };
 
-// Adds and removes repos. Each change holds the workspace lock from start to
+struct UpdateResult {
+    RepoEntry repo;       // as it is now
+    std::string reason;   // why it was rebuilt, like "new commit"; empty if it wasn't
+    IngestReport report;  // only filled in if it was rebuilt
+};
+
+// Adds, updates and removes repos. Each change holds the workspace lock from start to
 // finish, and cleans up leftovers both before and after its own work.
 // Methods throw std::runtime_error (or a subclass) with a message for the user.
 class RepoManager {
@@ -35,13 +41,23 @@ public:
     void setOnWait(std::function<void()> onWait) { onWait_ = std::move(onWait); }
 
     // For tests: called with the name of each step as it finishes ("locked",
-    // "cloned", "written", "moved", "saved", "cleaned"), so a test can stop
-    // the process there.
+    // "cloned" or "fetched", "written", "moved", "saved", "cleaned"), so a
+    // test can stop the process there.
     void setOnStep(std::function<void(std::string_view)> onStep) { onStep_ = std::move(onStep); }
+
+    // The filter settings new builds use. Users can't change them yet; tests
+    // do, to check that a changed setting causes a rebuild.
+    void setFilterConfig(FilterConfig config) { filterConfig_ = std::move(config); }
 
     // `source` is a local folder or a GitHub URL. An empty `name` means use
     // the folder's or the GitHub repo's name.
     AddResult add(const std::string& source, const std::string& name);
+
+    // Fetches a GitHub repo's latest commit (a local repo is read as it is),
+    // then rebuilds its index if anything changed: the commit, the index
+    // format, the filter rules or settings, or the index file doesn't open
+    // or doesn't match the registry. `rebuild` builds it anyway.
+    UpdateResult update(const std::string& name, bool rebuild);
 
     // Forgets the repo and deletes its index files, and its clone if we own
     // one. Never touches a local repo's folder. Returns what was removed.
@@ -50,11 +66,22 @@ public:
 private:
     void step(std::string_view name) const;
 
+    // Indexes `commit` of `repo` and publishes it as the next index file of
+    // `entry`, then saves `registry` with the new `entry` in it. Updates
+    // `entry` and `registry` to match what's on disk.
+    IngestReport buildAndPublish(RegistryStore& store, Registry& registry, RepoEntry& entry,
+                                 const GitRepo& repo, const ObjectId& commit);
+
     Workspace workspace_;
     Cloner cloner_;
+    FilterConfig filterConfig_;
     std::function<void()> onWait_;
     std::function<void(std::string_view)> onStep_;
 };
+
+// Text to add to an error about a damaged index of repo `name`, telling the
+// user how to rebuild it.
+std::string rebuildHint(const std::string& name);
 
 // The registry as it is now. Doesn't take the lock.
 Registry loadRegistry(const Workspace& workspace);

@@ -53,6 +53,12 @@ bool isValidRepoName(std::string_view name);
 // The index file name for repo `id`'s build number `generation`.
 std::string indexFileName(const std::string& id, std::uint32_t generation);
 
+// The name for the build after `currentFile`, like "r_1c2d3e4f-g0002.idx"
+// after "r_1c2d3e4f-g0001.idx". An empty `currentFile` gives build 1. Throws
+// RegistryError if `currentFile` isn't a name for repo `id`, or its number
+// can't go any higher.
+std::string nextIndexFileName(const std::string& id, const std::string& currentFile);
+
 // A new random repo ID that `registry` doesn't use yet.
 std::string newRepoId(const Registry& registry);
 

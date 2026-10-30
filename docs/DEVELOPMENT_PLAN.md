@@ -174,6 +174,34 @@ the running build's files; searches keep working during a change.
 
 ## M5: Update
 
+Status: done. Notes:
+
+- `fetchLatest` runs `git fetch --depth 1 --no-tags origin HEAD` and then
+  `git update-ref HEAD FETCH_HEAD`. Our clones are bare and have no fetch
+  rules, so a plain fetch would leave HEAD where it was. Fetching the remote's
+  `HEAD` follows its default branch, and force-pushes too.
+- Both commands use `--git-dir` instead of `-C`. With `-C`, Git looks in the
+  folders above a broken clone for another repo, and could move that repo's
+  branch.
+- Update skips the build only when the commit, `format_version`,
+  `policy_version` and `config_fingerprint` all match, and the index file
+  opens with a header that matches the registry. It says why it rebuilt: "new
+  commit", "new index format", "new filter rules", "changed settings", "the
+  index file can't be used: ..." or "asked to rebuild".
+- Damage found on open gets rebuilt by a plain `update`. Damage found on read
+  or by `verify` can't be seen by opening the file, so those errors name the
+  fix: `code-search update <name> --rebuild`. We don't rebuild during a
+  search, since searches don't take the lock.
+- Each build gets the next file name (`-g0001.idx`, then `-g0002.idx`), so the
+  new file never replaces the one searches may have open.
+- `add` and `update` share `buildAndPublish`. Kill tests cover update at every
+  step, including right after the fetch.
+- A one-file change on golang/go (15,331 files) takes 1.94 s, the same as
+  `add` (2.00 s), because the whole index is rebuilt. An update with nothing
+  to do takes 0.02 s. Release build, warm cache.
+- Users can't change filter settings yet. Tests change them through
+  `RepoManager::setFilterConfig`.
+
 - Fetch clones we own (remote default branch), then look up the commit ID once.
 - Skip only when commit, `format_version`, `policy_version` and
   `config_fingerprint` all match and the index opens fine. `--rebuild` forces a

@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "codesearch/git/git_repo.hpp"
+#include "codesearch/git/git_runner.hpp"
 #include "codesearch/index/file_filter.hpp"
 #include "codesearch/index/index_file_error.hpp"
 #include "codesearch/index/shard_format.hpp"
@@ -83,6 +84,59 @@ std::string pickName(const std::string& requested, const Source& source, const R
     return name;
 }
 
+// What the header of an index of `commit` built now records.
+ShardInfo shardInfoFor(const ObjectId& commit, const FilterConfig& config) {
+    return ShardInfo{
+        .commit = commit,
+        .policyVersion = kPolicyVersion,
+        .configFingerprint = configFingerprint(config),
+    };
+}
+
+// Why the index `current` must be rebuilt to match `wanted`, or an empty
+// string if it's fine as it is.
+std::string whyRebuild(const Workspace& workspace, const IndexInfo& current,
+                       const ShardInfo& wanted) {
+    if (current.commit != wanted.commit) {
+        return "new commit";
+    }
+    if (current.formatVersion != kFormatVersion) {
+        return "new index format";
+    }
+    if (current.policyVersion != wanted.policyVersion) {
+        return "new filter rules";
+    }
+    if (current.configFingerprint != wanted.configFingerprint) {
+        return "changed settings";
+    }
+    try {
+        const ShardReader reader(workspace.indexesDir() / current.file);
+        const ShardHeader& header = reader.header();
+        if (reader.commit() != current.commit || header.formatVersion != current.formatVersion ||
+            header.policyVersion != current.policyVersion ||
+            header.configFingerprint != current.configFingerprint) {
+            return "the index file doesn't match the registry";
+        }
+    } catch (const std::runtime_error& error) {
+        return std::string("the index file can't be used: ") + error.what();
+    }
+    return "";
+}
+
+// `registry` with `entry` in it, in place of the entry with the same ID if
+// there is one, sorted by name.
+Registry withRepo(Registry registry, const RepoEntry& entry) {
+    std::erase_if(registry.repos, [&](const RepoEntry& repo) {
+        return repo.id == entry.id;
+    });
+    registry.repos.push_back(entry);
+    std::sort(registry.repos.begin(), registry.repos.end(),
+              [](const RepoEntry& a, const RepoEntry& b) {
+                  return a.name < b.name;
+              });
+    return registry;
+}
+
 }  // namespace
 
 RepoManager::RepoManager(Workspace workspace, Cloner cloner)
@@ -124,47 +178,16 @@ AddResult RepoManager::add(const std::string& source, const std::string& name) {
         if (!commit.has_value()) {
             throw std::runtime_error(source + " has no commits yet");
         }
-        const FileFilter filter;
-        const CommitIndex built = indexCommit(repo, commit.value(), filter);
-        const ShardInfo info{
-            .commit = commit.value(),
-            .policyVersion = kPolicyVersion,
-            .configFingerprint = configFingerprint(filter.config()),
-        };
-        const RepoEntry entry{
+        RepoEntry entry{
             .id = id,
             .name = repoName,
             .source = resolved.kind,
             .location = resolved.location,
-            .index =
-                IndexInfo{
-                    .file = indexFileName(id, 1),  // build 1; updates (M5) count up
-                    .commit = info.commit,
-                    .formatVersion = kFormatVersion,
-                    .policyVersion = info.policyVersion,
-                    .configFingerprint = info.configFingerprint,
-                },
+            // No index file yet. buildAndPublish fills this in.
+            .index = IndexInfo{.file = "", .commit = commit.value()},
         };
-
-        const std::filesystem::path tmpFile =
-            writeToTmp(workspace_, built.index, info, entry.index.file);
-        step("written");
-        moveIntoIndexes(workspace_, tmpFile);
-        step("moved");
-
-        Registry updated = registry;
-        updated.repos.push_back(entry);
-        std::sort(updated.repos.begin(), updated.repos.end(),
-                  [](const RepoEntry& a, const RepoEntry& b) {
-                      return a.name < b.name;
-                  });
-        store.save(updated);
-        registry = std::move(updated);  // from here on, this is what's on disk
-        step("saved");
-
-        cleanUp(workspace_, registry);
-        step("cleaned");
-        return AddResult{.repo = entry, .report = built.report};
+        const IngestReport report = buildAndPublish(store, registry, entry, repo, commit.value());
+        return AddResult{.repo = entry, .report = report};
     } catch (...) {
         // Delete what we made so far: the clone, files in tmp/ and indexes/.
         // `registry` is what's on disk, so nothing it uses gets deleted.
@@ -174,6 +197,84 @@ AddResult RepoManager::add(const std::string& source, const std::string& name) {
         }
         throw;
     }
+}
+
+UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
+    workspace_.create();
+    const FileLock lock(workspace_.lockFile(), onWait_);
+    step("locked");
+    JsonRegistryStore store(workspace_.registryFile());
+    Registry registry = store.load();
+    cleanUp(workspace_, registry);
+
+    const RepoEntry* found = registry.find(name);
+    if (found == nullptr) {
+        throw std::runtime_error("no repo named " + name);
+    }
+    RepoEntry entry = *found;
+
+    try {
+        std::filesystem::path repoDir = entry.location;
+        if (entry.source == RepoSource::GitHub) {
+            repoDir = workspace_.cloneDir(entry.id);
+            fetchLatest(repoDir);
+            step("fetched");
+        }
+
+        const GitRepo repo(repoDir);
+        const std::optional<ObjectId> commit = repo.resolveHead();
+        if (!commit.has_value()) {
+            throw std::runtime_error(entry.location + " has no commits");
+        }
+        const std::string reason =
+            rebuild
+                ? "asked to rebuild"
+                : whyRebuild(workspace_, entry.index, shardInfoFor(commit.value(), filterConfig_));
+        if (reason.empty()) {
+            return UpdateResult{.repo = entry, .reason = "", .report = {}};
+        }
+        const IngestReport report = buildAndPublish(store, registry, entry, repo, commit.value());
+        return UpdateResult{.repo = entry, .reason = reason, .report = report};
+    } catch (...) {
+        // Same as in add: the old index stays, and this build's files go.
+        try {
+            cleanUp(workspace_, registry);
+        } catch (...) {  // NOLINT(bugprone-empty-catch) keep the first error; next run cleans up
+        }
+        throw;
+    }
+}
+
+IngestReport RepoManager::buildAndPublish(RegistryStore& store, Registry& registry,
+                                          RepoEntry& entry, const GitRepo& repo,
+                                          const ObjectId& commit) {
+    const FileFilter filter(filterConfig_);
+    const CommitIndex built = indexCommit(repo, commit, filter);
+    const ShardInfo info = shardInfoFor(commit, filter.config());
+
+    RepoEntry updated = entry;
+    updated.index = IndexInfo{
+        .file = nextIndexFileName(entry.id, entry.index.file),
+        .commit = info.commit,
+        .formatVersion = kFormatVersion,
+        .policyVersion = info.policyVersion,
+        .configFingerprint = info.configFingerprint,
+    };
+    const std::filesystem::path tmpFile =
+        writeToTmp(workspace_, built.index, info, updated.index.file);
+    step("written");
+    moveIntoIndexes(workspace_, tmpFile);
+    step("moved");
+
+    Registry newRegistry = withRepo(registry, updated);
+    store.save(newRegistry);
+    registry = std::move(newRegistry);  // from here on, this is what's on disk
+    entry = std::move(updated);
+    step("saved");
+
+    cleanUp(workspace_, registry);  // deletes the old index file
+    step("cleaned");
+    return built.report;
 }
 
 RepoEntry RepoManager::remove(const std::string& name) {
@@ -199,6 +300,10 @@ RepoEntry RepoManager::remove(const std::string& name) {
     return removed;
 }
 
+std::string rebuildHint(const std::string& name) {
+    return ". Rebuild it with: code-search update " + name + " --rebuild";
+}
+
 Registry loadRegistry(const Workspace& workspace) {
     return JsonRegistryStore(workspace.registryFile()).load();
 }
@@ -221,7 +326,7 @@ std::vector<OpenRepo> openRepos(const Workspace& workspace, const std::string& o
                 opened.push_back(
                     OpenRepo{.name = repo.name, .index = std::make_unique<ShardReader>(path)});
             } catch (const IndexFileError& error) {
-                throw IndexFileError(repo.name + ": " + error.what());
+                throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
             } catch (const std::runtime_error&) {
                 if (attempt == 1 && !std::filesystem::exists(path)) {
                     fileWentAway = true;

@@ -187,6 +187,28 @@ std::string indexFileName(const std::string& id, std::uint32_t generation) {
     return id + "-g" + digits + ".idx";
 }
 
+std::string nextIndexFileName(const std::string& id, const std::string& currentFile) {
+    if (currentFile.empty()) {
+        return indexFileName(id, 1);
+    }
+    if (!isValidIndexFileName(currentFile, id)) {
+        throw RegistryError("bad index file name: " + currentFile);
+    }
+    // The digits between "-g" and ".idx".
+    const std::size_t start = id.size() + 2;
+    const std::size_t end = currentFile.size() - 4;
+    std::uint32_t generation = 0;
+    // from_chars reads a number from text. It fails if the text isn't a
+    // number or the number doesn't fit in `generation`.
+    const auto [stop, error] =
+        std::from_chars(currentFile.data() + start, currentFile.data() + end, generation);
+    if (error != std::errc() || stop != currentFile.data() + end ||
+        generation == std::numeric_limits<std::uint32_t>::max()) {
+        throw RegistryError("can't count up from index file " + currentFile);
+    }
+    return indexFileName(id, generation + 1);
+}
+
 std::string newRepoId(const Registry& registry) {
     // random_device asks the system for random numbers. It's slow, but we
     // only need one.

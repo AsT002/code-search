@@ -420,8 +420,9 @@ a short lock for the registry.
 What we promise about crashes: if the process is killed at any point, the current
 state is still complete and usable. We don't promise anything about power loss
 (on macOS that would need `F_FULLFSYNC`). Checks run lazily and won't catch every
-kind of damage. If we do find a damaged index, on open, on read or with `verify`,
-we rebuild that repo.
+kind of damage. If `update` finds the index won't open, it rebuilds it. Damage
+found on read or with `verify` doesn't show on open, so those errors tell the
+user to run `update <name> --rebuild`.
 
 ## Main flows
 
@@ -432,7 +433,8 @@ code-search add <url|path> [--name n]
   → look up the commit ID once → read files → build → publish
 
 code-search update <name> [--rebuild]
-  (fetch if we own the clone) → look up the commit ID once
+  (if we own the clone: fetch origin HEAD, move our branch to it)
+  → look up the commit ID once
   → skip if commit, format_version, policy_version and config_fingerprint all
     match and the index opens fine, unless --rebuild
   → otherwise build → publish

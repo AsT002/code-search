@@ -25,6 +25,7 @@ void printUsage(std::ostream& out) {
     out << "usage:\n"
            "  code-search add <folder | https://github.com/<owner>/<repo>> [--name <name>]\n"
            "  code-search list\n"
+           "  code-search update <name> [--rebuild]\n"
            "  code-search remove <name>\n"
            "  code-search search [--repo <name>] [--case-sensitive] [-l] [--] <text>\n"
            "  code-search search --path <folder> [--case-sensitive] [-l] [--] <text>\n"
@@ -201,7 +202,11 @@ int runSearch(const SearchArgs& args) {
     }
     bool found = false;
     for (const OpenRepo& repo : repos) {
-        found = printResults(*repo.index, args, repo.name + ":") || found;
+        try {
+            found = printResults(*repo.index, args, repo.name + ":") || found;
+        } catch (const IndexFileError& error) {
+            throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
+        }
     }
     return found ? 0 : 1;  // like grep: 1 means nothing found
 }
@@ -245,6 +250,18 @@ int runList() {
     return 0;
 }
 
+int runUpdate(const std::string& name, bool rebuild) {
+    const UpdateResult result = makeManager().update(name, rebuild);
+    if (result.reason.empty()) {
+        std::cout << result.repo.name << " is up to date (commit " << result.repo.index.commit.hex()
+                  << ")\n";
+        return 0;
+    }
+    printReport(result.repo.index.commit, result.report);
+    std::cout << "updated " << result.repo.name << " (" << result.reason << ")\n";
+    return 0;
+}
+
 int runRemove(const std::string& name) {
     const RepoEntry removed = makeManager().remove(name);
     std::cout << "removed " << removed.name;
@@ -274,7 +291,7 @@ int runVerify(const std::string& name) {
         return 0;
     } catch (const IndexFileError& error) {
         std::cerr << "code-search: " << name << " (" << path.string() << "): " << error.what()
-                  << '\n';
+                  << rebuildHint(name) << '\n';
         return 1;
     }
 }
@@ -305,6 +322,11 @@ int run(std::span<char*> args) {
         }
     } else if (command == "list" && args.size() == 2) {
         return runList();
+    } else if (command == "update" && args.size() == 3) {
+        return runUpdate(args[2], false);
+    } else if (command == "update" && args.size() == 4 &&
+               std::string_view(args[3]) == "--rebuild") {
+        return runUpdate(args[2], true);
     } else if (command == "remove" && args.size() == 3) {
         return runRemove(args[2]);
     } else if (command == "verify" && args.size() == 3) {

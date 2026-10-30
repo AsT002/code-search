@@ -164,6 +164,17 @@ TEST(Registry, NamesAndFileNames) {
     EXPECT_EQ(indexFileName("r_00000001", 12345), "r_00000001-g12345.idx");
 }
 
+TEST(Registry, NextIndexFileName) {
+    EXPECT_EQ(nextIndexFileName("r_00000001", ""), "r_00000001-g0001.idx");
+    EXPECT_EQ(nextIndexFileName("r_00000001", "r_00000001-g0001.idx"), "r_00000001-g0002.idx");
+    EXPECT_EQ(nextIndexFileName("r_00000001", "r_00000001-g9999.idx"), "r_00000001-g10000.idx");
+    EXPECT_EQ(nextIndexFileName("r_00000001", "r_00000001-g4294967294.idx"),
+              "r_00000001-g4294967295.idx");
+    EXPECT_THROW(nextIndexFileName("r_00000001", "r_00000001-g4294967295.idx"), RegistryError);
+    EXPECT_THROW(nextIndexFileName("r_00000001", "r_00000001-g99999999999.idx"), RegistryError);
+    EXPECT_THROW(nextIndexFileName("r_00000001", "r_00000002-g0001.idx"), RegistryError);
+}
+
 TEST(Registry, NewIdsAreUnusedAndWellFormed) {
     Registry registry;
     for (int i = 0; i < 50; ++i) {

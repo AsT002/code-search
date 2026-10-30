@@ -1,4 +1,4 @@
-// Adding, listing, searching and removing repos in a workspace, start to
+// Adding, listing, searching, updating and removing repos in a workspace, start to
 // finish, including what happens when a command is killed partway.
 
 #include "codesearch/app/repo_manager.hpp"
@@ -105,9 +105,9 @@ void fillBackend(TempRepo& repo) {
     repo.commit();
 }
 
-void fillFrontend(TempRepo& repo) {
+ObjectId fillFrontend(TempRepo& repo) {
     repo.write("app.js", "shared needle in the frontend\n");
-    repo.commit();
+    return repo.commit();
 }
 
 TEST(RepoManager, AddSearchListRemove) {
@@ -328,6 +328,220 @@ TEST(RepoManager, MissingIndexFileIsAnError) {
         "could not open");
 }
 
+// ---- Update ----
+
+// The index file name the registry has for repo `name`.
+std::string indexFileOf(const Workspace& workspace, const std::string& name) {
+    const Registry registry = loadRegistry(workspace);  // `repo` points into this
+    const RepoEntry* repo = registry.find(name);
+    return repo == nullptr ? "" : repo->index.file;
+}
+
+TEST(RepoManager, UpdatePicksUpNewCommits) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    RepoManager manager(workspace, noGitHub());
+    const std::string id = manager.add(backend.dir().string(), "backend").repo.id;
+    EXPECT_EQ(indexFileOf(workspace, "backend"), id + "-g0001.idx");
+
+    // Nothing changed: nothing happens.
+    const std::string before = readFile(workspace.registryFile());
+    UpdateResult result = manager.update("backend", false);
+    EXPECT_EQ(result.reason, "");
+    EXPECT_EQ(readFile(workspace.registryFile()), before);
+    EXPECT_EQ(namesIn(workspace.indexesDir()), (std::set<std::string>{id + "-g0001.idx"}));
+
+    backend.write("c.txt", "fresh needle\n");
+    const ObjectId commit = backend.commit();
+    result = manager.update("backend", false);
+    EXPECT_EQ(result.reason, "new commit");
+    EXPECT_EQ(result.repo.index.commit, commit);
+    EXPECT_EQ(result.report.indexed.files, 3U);
+    EXPECT_EQ(indexFileOf(workspace, "backend"), id + "-g0002.idx");
+    EXPECT_EQ(searchAll(workspace, "needle"),
+              (std::vector<std::string>{"backend:a.txt", "backend:c.txt"}));
+    expectTidy(workspace);  // the old index file is gone
+
+    // --rebuild builds even when nothing changed.
+    result = manager.update("backend", true);
+    EXPECT_EQ(result.reason, "asked to rebuild");
+    EXPECT_EQ(indexFileOf(workspace, "backend"), id + "-g0003.idx");
+    expectTidy(workspace);
+
+    expectError(
+        [&] {
+            manager.update("nope", false);
+        },
+        "no repo named nope");
+}
+
+TEST(RepoManager, UpdateFetchesGitHubRepos) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo frontend;
+    const ObjectId first = fillFrontend(frontend);
+    RepoManager manager(workspace, fakeGitHub(frontend));
+    manager.add("https://github.com/example/frontend", "");
+    EXPECT_EQ(manager.update("frontend", false).reason, "");
+
+    frontend.write("new.js", "needle again\n");
+    const ObjectId second = frontend.commit();
+    UpdateResult result = manager.update("frontend", false);
+    EXPECT_EQ(result.reason, "new commit");
+    EXPECT_EQ(result.repo.index.commit, second);
+    EXPECT_EQ(searchAll(workspace, "needle"),
+              (std::vector<std::string>{"frontend:app.js", "frontend:new.js"}));
+
+    // A force-push that drops new.js again.
+    frontend.git({"reset", "--quiet", "--hard", first.hex()});
+    frontend.write("other.js", "rewritten\n");
+    const ObjectId rewritten = frontend.commit();
+    result = manager.update("frontend", false);
+    EXPECT_EQ(result.repo.index.commit, rewritten);
+    EXPECT_EQ(searchAll(workspace, "needle"), (std::vector<std::string>{"frontend:app.js"}));
+    expectTidy(workspace);
+}
+
+TEST(RepoManager, FailedUpdateKeepsTheOldIndex) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    std::optional<TempRepo> frontend;
+    frontend.emplace();
+    fillFrontend(*frontend);
+    RepoManager manager(workspace, fakeGitHub(*frontend));
+    manager.add(backend.dir().string(), "backend");
+    manager.add("https://github.com/example/frontend", "");
+    const std::string before = readFile(workspace.registryFile());
+
+    frontend.reset();  // the remote is gone, so fetching fails
+    expectError(
+        [&] {
+            manager.update("frontend", false);
+        },
+        "could not fetch");
+
+    // A failure after the new file is made: it gets deleted right away.
+    for (const std::string step : {"written", "moved"}) {
+        SCOPED_TRACE("failed after " + step);
+        manager.setOnStep([&](std::string_view now) {
+            if (now == step) {
+                throw std::runtime_error("disk full");
+            }
+        });
+        expectError(
+            [&] {
+                manager.update("backend", true);
+            },
+            "disk full");
+        expectTidy(workspace);
+    }
+    manager.setOnStep({});
+
+    // A local repo with a file Git can't read: the build fails partway.
+    backend.write("c.txt", "will go missing\n");
+    backend.commit();
+    backend.removeObject(backend.blobId("c.txt"));
+    expectError(
+        [&] {
+            manager.update("backend", false);
+        },
+        "c.txt");
+
+    EXPECT_EQ(readFile(workspace.registryFile()), before);
+    EXPECT_EQ(searchAll(workspace, "needle"),
+              (std::vector<std::string>{"backend:a.txt", "frontend:app.js"}));
+    expectTidy(workspace);
+}
+
+TEST(RepoManager, ChangedSettingsCauseARebuild) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    backend.write("small.txt", "needle\n");
+    backend.write("big.txt", "needle " + std::string(100, 'x') + "\n");
+    backend.commit();
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+
+    FilterConfig config;
+    config.maxFileBytes = 50;
+    manager.setFilterConfig(config);
+    const UpdateResult result = manager.update("backend", false);
+    EXPECT_EQ(result.reason, "changed settings");
+    EXPECT_EQ(result.report.skipped.at(SkipReason::TooLarge).files, 1U);
+    EXPECT_EQ(searchAll(workspace, "needle"), (std::vector<std::string>{"backend:small.txt"}));
+    EXPECT_EQ(manager.update("backend", false).reason, "");  // and then it's current
+}
+
+TEST(RepoManager, OlderFormatOrRulesCauseARebuild) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+
+    // Each time, pretend the index was built by an older code-search, by
+    // changing what the registry says about it.
+    JsonRegistryStore store(workspace.registryFile());
+    Registry registry = store.load();
+    registry.repos[0].index.formatVersion = 0;
+    store.save(registry);
+    EXPECT_EQ(manager.update("backend", false).reason, "new index format");
+
+    registry = store.load();
+    registry.repos[0].index.policyVersion = kPolicyVersion - 1;
+    store.save(registry);
+    EXPECT_EQ(manager.update("backend", false).reason, "new filter rules");
+
+    registry = store.load();
+    registry.repos[0].index.configFingerprint += 1;
+    store.save(registry);
+    EXPECT_EQ(manager.update("backend", false).reason, "changed settings");
+
+    EXPECT_EQ(manager.update("backend", false).reason, "");
+    expectTidy(workspace);
+}
+
+// Runs update and checks it rebuilt the index for a reason containing `part`.
+void expectRebuilt(RepoManager& manager, const Workspace& workspace, const std::string& part) {
+    const std::string reason = manager.update("backend", false).reason;
+    EXPECT_NE(reason.find(part), std::string::npos) << reason;
+    EXPECT_EQ(searchAll(workspace, "needle", "backend"),
+              (std::vector<std::string>{"backend:a.txt"}));
+    expectTidy(workspace);
+}
+
+TEST(RepoManager, BadIndexFilesGetRebuilt) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    TempRepo other;
+    other.write("x.txt", "other\n");
+    other.commit();
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+    manager.add(other.dir().string(), "other");
+    const auto backendFile = [&] {
+        return workspace.indexesDir() / indexFileOf(workspace, "backend");
+    };
+
+    std::filesystem::remove(backendFile());
+    expectRebuilt(manager, workspace, "can't be used: could not open");
+
+    writeFile(backendFile(), "hello");
+    expectRebuilt(manager, workspace, "can't be used: not an index file");
+
+    // A good index file, but of another commit than the registry says.
+    writeFile(backendFile(), readFile(workspace.indexesDir() / indexFileOf(workspace, "other")));
+    expectRebuilt(manager, workspace, "doesn't match the registry");
+}
+
 // ---- Killed partway ----
 
 // Runs `fn` in a child process (fork) and returns its exit code. The child
@@ -459,6 +673,40 @@ TEST(RepoManager, KilledRemoveLeavesACompleteState) {
                              : std::vector<std::string>{"backend:a.txt"};
         EXPECT_EQ(searchAll(workspace, "needle"), expected);
         cleanUp(workspace, loadRegistry(workspace));
+        expectTidy(workspace);
+    }
+}
+
+TEST(RepoManager, KilledUpdateKeepsAUsableIndex) {
+    TempRepo frontend;
+    fillFrontend(frontend);
+
+    for (const std::string step : {"locked", "fetched", "written", "moved", "saved", "cleaned"}) {
+        SCOPED_TRACE("killed after " + step);
+        const TempDir home;
+        const Workspace workspace(home.file("ws"));
+        TempRepo source;
+        fillFrontend(source);
+        RepoManager(workspace, fakeGitHub(source)).add("https://github.com/example/frontend", "");
+        source.write("new.js", "needle too\n");
+        source.commit();
+
+        ASSERT_TRUE(stopAfterStep(workspace, noGitHub(), step, [](RepoManager& m) {
+            m.update("frontend", false);
+        }));
+
+        const bool saved = step == "saved" || step == "cleaned";
+        const std::vector<std::string> expected =
+            saved ? std::vector<std::string>{"frontend:app.js", "frontend:new.js"}
+                  : std::vector<std::string>{"frontend:app.js"};
+        EXPECT_EQ(searchAll(workspace, "needle"), expected);
+        cleanUp(workspace, loadRegistry(workspace));
+        expectTidy(workspace);
+
+        // The next update finishes the job.
+        RepoManager(workspace, noGitHub()).update("frontend", false);
+        EXPECT_EQ(searchAll(workspace, "needle"),
+                  (std::vector<std::string>{"frontend:app.js", "frontend:new.js"}));
         expectTidy(workspace);
     }
 }

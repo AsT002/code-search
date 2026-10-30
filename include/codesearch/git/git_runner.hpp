@@ -31,4 +31,10 @@ GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string
 // waiting. Throws GitError on failure. Only pass URLs you've checked.
 void cloneShallow(const std::string& url, const std::filesystem::path& dest);
 
+// Brings a clone made by cloneShallow up to date: fetches the commit the
+// remote's default branch points to now (depth 1, no tags), and points the
+// clone's HEAD branch at it. Works after a force-push too. Throws GitError on
+// failure. Only use it on clones we own.
+void fetchLatest(const std::filesystem::path& clone);
+
 }  // namespace codesearch
