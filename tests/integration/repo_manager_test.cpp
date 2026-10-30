@@ -19,6 +19,7 @@
 #include "codesearch/git/git_runner.hpp"
 #include "codesearch/repo/publisher.hpp"
 #include "codesearch/search/searcher.hpp"
+#include "codesearch/util/atomic_file.hpp"
 #include "codesearch/util/file_lock.hpp"
 
 namespace codesearch {
@@ -361,6 +362,48 @@ bool stopAfterStep(const Workspace& workspace, const Cloner& cloner, const std::
         change(manager);
     });
     return exitCode == 0;
+}
+
+TEST(RepoManager, SymlinkedFolderStopsAdd) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    std::filesystem::create_directories(workspace.root());
+    std::filesystem::create_directories(home.file("elsewhere"));
+    writeFile(home.file("elsewhere") / "precious.txt", "keep me");
+    std::filesystem::create_directory_symlink(home.file("elsewhere"), workspace.tmpDir());
+
+    expectError(
+        [&] {
+            RepoManager(workspace, noGitHub()).add(backend.dir().string(), "x");
+        },
+        "must be a plain folder");
+    EXPECT_EQ(namesIn(home.file("elsewhere")), (std::set<std::string>{"precious.txt"}));
+}
+
+TEST(RepoManager, KilledRegistrySaveIsCleanedUp) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+    const std::string before = readFile(workspace.registryFile());
+
+    // A save that dies after writing part of the new registry.
+    EXPECT_EQ(runInChild([&] {
+                  AtomicFile file(workspace.registryFile());
+                  file.write("{\"version\": 1, \"rep");
+                  ::_exit(0);
+              }),
+              0);
+    EXPECT_EQ(readFile(workspace.registryFile()), before);  // the old one is intact
+    EXPECT_EQ(namesIn(workspace.root()).size(), 6U);        // with the leftover
+
+    manager.remove("backend");  // any change cleans up first
+    EXPECT_EQ(namesIn(workspace.root()),
+              (std::set<std::string>{"indexes", "lock", "registry.json", "repos", "tmp"}));
 }
 
 TEST(RepoManager, KilledAddLeavesACompleteState) {

@@ -34,8 +34,14 @@ public:
         return reposDir() / (id + ".git");
     }
 
-    // Creates the folders that don't exist yet.
+    // Creates the folders that don't exist yet, then checks them (checkFolders).
     void create() const;
+
+    // Throws std::runtime_error unless each of repos/, indexes/ and tmp/ that
+    // exists is a real folder directly inside the root, not a symlink. Cleanup
+    // deletes inside these folders, so a symlinked one could point it at
+    // anything on the machine.
+    void checkFolders() const;
 
 private:
     std::filesystem::path root_;

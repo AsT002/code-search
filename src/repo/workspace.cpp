@@ -36,6 +36,25 @@ void Workspace::create() const {
     std::filesystem::create_directories(reposDir());
     std::filesystem::create_directories(indexesDir());
     std::filesystem::create_directories(tmpDir());
+    checkFolders();
+}
+
+void Workspace::checkFolders() const {
+    for (const std::filesystem::path& dir : {reposDir(), indexesDir(), tmpDir()}) {
+        // symlink_status looks at the name itself; status() would follow a symlink.
+        const std::filesystem::file_status status = std::filesystem::symlink_status(dir);
+        if (!std::filesystem::exists(status)) {
+            continue;
+        }
+        // canonical() follows every symlink, so this also catches a root
+        // whose subfolder resolves somewhere else.
+        if (!std::filesystem::is_directory(status) ||
+            std::filesystem::canonical(dir).parent_path() != std::filesystem::canonical(root_)) {
+            throw std::runtime_error(dir.string() + " must be a plain folder inside " +
+                                     root_.string() +
+                                     ", not a symlink or file. Move it away and try again");
+        }
+    }
 }
 
 }  // namespace codesearch

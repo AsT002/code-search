@@ -42,6 +42,25 @@ void removeAllExcept(const std::filesystem::path& dir, const std::set<std::strin
     }
 }
 
+// Deletes the "registry.json.tmp-XXXXXX" files AtomicFile makes while saving
+// the registry. One is left behind only if a save was killed partway.
+void removeRegistryTempFiles(const Workspace& workspace) {
+    if (!std::filesystem::exists(workspace.root())) {
+        return;
+    }
+    const std::string prefix = workspace.registryFile().filename().string() + ".tmp-";
+    std::vector<std::filesystem::directory_entry> doomed;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(workspace.root())) {
+        if (entry.path().filename().string().starts_with(prefix)) {
+            doomed.push_back(entry);
+        }
+    }
+    for (const std::filesystem::directory_entry& entry : doomed) {
+        removeEntry(workspace.root(), entry);
+    }
+}
+
 }  // namespace
 
 std::filesystem::path writeToTmp(const Workspace& workspace, const MemoryIndex& index,
@@ -64,6 +83,7 @@ void moveIntoIndexes(const Workspace& workspace, const std::filesystem::path& tm
 }
 
 void cleanUp(const Workspace& workspace, const Registry& registry) {
+    workspace.checkFolders();
     std::set<std::string> indexFiles;
     std::set<std::string> clones;
     for (const RepoEntry& repo : registry.repos) {
@@ -75,6 +95,7 @@ void cleanUp(const Workspace& workspace, const Registry& registry) {
     removeAllExcept(workspace.tmpDir(), {});
     removeAllExcept(workspace.indexesDir(), indexFiles);
     removeAllExcept(workspace.reposDir(), clones);
+    removeRegistryTempFiles(workspace);
 }
 
 }  // namespace codesearch

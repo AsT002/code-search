@@ -81,6 +81,52 @@ TEST(Publisher, CleanUpNeverFollowsSymlinksOut) {
     EXPECT_EQ(readFile(dir.file("precious.idx")), "keep me too");
 }
 
+// tmp/, indexes/ or repos/ replaced by a symlink to a folder elsewhere.
+// Cleanup must refuse, not delete what's in the other folder.
+TEST(Publisher, CleanUpRefusesSymlinkedFolders) {
+    for (const std::string name : {"tmp", "indexes", "repos"}) {
+        SCOPED_TRACE(name);
+        const TempDir dir;
+        const Workspace workspace(dir.file("ws"));
+        workspace.create();
+        std::filesystem::create_directories(dir.file("elsewhere"));
+        writeFile(dir.file("elsewhere") / "precious.txt", "keep me");
+        std::filesystem::remove(workspace.root() / name);
+        std::filesystem::create_directory_symlink(dir.file("elsewhere"), workspace.root() / name);
+
+        EXPECT_THROW(cleanUp(workspace, Registry{}), std::runtime_error);
+        EXPECT_THROW(workspace.create(), std::runtime_error);
+        EXPECT_EQ(readFile(dir.file("elsewhere") / "precious.txt"), "keep me");
+    }
+}
+
+TEST(Publisher, CleanUpRefusesAFileInsteadOfAFolder) {
+    const TempDir dir;
+    const Workspace workspace(dir.file("ws"));
+    workspace.create();
+    std::filesystem::remove(workspace.tmpDir());
+    writeFile(workspace.tmpDir(), "not a folder");
+    EXPECT_THROW(cleanUp(workspace, Registry{}), std::runtime_error);
+}
+
+// A registry save killed partway leaves registry.json.tmp-XXXXXX next to it.
+TEST(Publisher, CleanUpRemovesRegistryTempFiles) {
+    const TempDir dir;
+    const Workspace workspace(dir.file("ws"));
+    workspace.create();
+    writeFile(workspace.registryFile(), "{}");
+    writeFile(workspace.root() / "registry.json.tmp-a1B2c3", "half written");
+    writeFile(workspace.root() / "notes.txt", "not ours to delete");
+    writeFile(dir.file("outside.txt"), "keep me");
+    std::filesystem::create_symlink(dir.file("outside.txt"),
+                                    workspace.root() / "registry.json.tmp-link");
+
+    cleanUp(workspace, Registry{});
+    EXPECT_EQ(namesIn(workspace.root()),
+              (std::set<std::string>{"indexes", "notes.txt", "registry.json", "repos", "tmp"}));
+    EXPECT_EQ(readFile(dir.file("outside.txt")), "keep me");
+}
+
 TEST(Publisher, CleanUpWithoutFoldersDoesNothing) {
     const TempDir dir;
     EXPECT_NO_THROW(cleanUp(Workspace(dir.file("ws")), Registry{}));

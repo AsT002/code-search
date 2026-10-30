@@ -397,9 +397,12 @@ lock and keep working while a change runs.
    doesn't list, and anything in `tmp/`. Release the lock.
 
 If a step fails, the same cleanup runs right away against the registry on
-disk. Cleanup only deletes entries directly inside `tmp/`, `indexes/` and
-`repos/`, checks that after following symlinks, and deletes a symlink itself,
-never what it points to.
+disk. Cleanup first checks that `tmp/`, `indexes/` and `repos/` are real
+folders inside the workspace, not symlinks, and stops with an error if not. It
+only deletes entries directly inside them, checks that after following
+symlinks, and deletes a symlink itself, never what it points to. It also
+deletes `registry.json.tmp-*` files, which a registry save killed partway
+leaves next to `registry.json`.
 
 Since `remove` can't run during a build, a build can't finish after a `remove` and
 bring the repo back.
