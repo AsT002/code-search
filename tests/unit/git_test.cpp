@@ -208,6 +208,22 @@ TEST(FetchLatest, FollowsTheRemoteEvenAfterAForcePush) {
     EXPECT_EQ(GitRepo(clone).resolveHead(), rewritten);
 }
 
+TEST(FetchLatest, WorksWhenThePathHasANewline) {
+    // A newline is allowed in a folder name, so Git's output can hold one
+    // before the newline it adds at the end.
+    TempRepo source;
+    source.write("a.txt", "one");
+    source.commit();
+    const TempDir dir;
+    const std::filesystem::path clone = dir.file("two\nlines") / "clone.git";
+    cloneShallow("file://" + source.dir().string(), clone);
+
+    source.write("a.txt", "two");
+    const ObjectId second = source.commit();
+    fetchLatest(clone);
+    EXPECT_EQ(GitRepo(clone).resolveHead(), second);
+}
+
 TEST(FetchLatest, NeverTouchesARepoAroundTheFolder) {
     // `outer` has a remote, so a fetch run in it would work and move its
     // branch. A broken clone folder inside it must fail instead.

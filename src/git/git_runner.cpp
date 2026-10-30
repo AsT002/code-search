@@ -71,9 +71,14 @@ void fetchLatest(const std::filesystem::path& clone) {
     if (where.exitCode != 0) {
         throw GitError(clone.string() + " isn't a Git repository:\n" + errorLines(where.err));
     }
+    // Remove only the newline Git adds at the end. The path itself can hold
+    // newlines, since a folder name may.
+    std::string path = where.out;
+    if (path.ends_with('\n')) {
+        path.pop_back();
+    }
     std::error_code error;
-    const std::filesystem::path commonDir = std::filesystem::canonical(
-        std::filesystem::path(where.out.substr(0, where.out.find('\n'))), error);
+    const std::filesystem::path commonDir = std::filesystem::canonical(path, error);
     if (error || commonDir != std::filesystem::canonical(clone)) {
         throw GitError("refusing to update " + clone.string() +
                        ": Git would write to another folder");
