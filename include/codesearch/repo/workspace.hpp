@@ -43,6 +43,12 @@ public:
     // anything on the machine.
     void checkFolders() const;
 
+    // Throws std::runtime_error unless the clone of repo `id` is a real
+    // folder directly inside repos/, with no symlinks anywhere inside it.
+    // Update writes to the clone, so a symlink could make Git write to
+    // another repo on the machine.
+    void checkClone(const std::string& id) const;
+
 private:
     std::filesystem::path root_;
 };

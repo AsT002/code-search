@@ -64,6 +64,20 @@ void fetchLatest(const std::filesystem::path& clone) {
     // --git-dir instead of -C: Git uses exactly this folder, and never looks
     // in the folders above it for another repo if this one is broken.
     const std::string gitDir = "--git-dir=" + clone.string();
+
+    // A "commondir" file in a repo folder tells Git to keep its branches in
+    // another folder. Ask Git where it would write, and check that it's here.
+    const GitResult where = runGitProcess({gitDir, "rev-parse", "--git-common-dir"});
+    if (where.exitCode != 0) {
+        throw GitError(clone.string() + " isn't a Git repository:\n" + errorLines(where.err));
+    }
+    std::error_code error;
+    const std::filesystem::path commonDir = std::filesystem::canonical(
+        std::filesystem::path(where.out.substr(0, where.out.find('\n'))), error);
+    if (error || commonDir != std::filesystem::canonical(clone)) {
+        throw GitError("refusing to update " + clone.string() +
+                       ": Git would write to another folder");
+    }
     const GitResult fetched =
         runGitProcess({gitDir, "fetch", "--quiet", "--depth", "1", "--no-tags", "origin", "HEAD"},
                       {"GIT_TERMINAL_PROMPT=0"});

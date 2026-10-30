@@ -216,6 +216,7 @@ UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
     try {
         std::filesystem::path repoDir = entry.location;
         if (entry.source == RepoSource::GitHub) {
+            workspace_.checkClone(entry.id);
             repoDir = workspace_.cloneDir(entry.id);
             fetchLatest(repoDir);
             step("fetched");

@@ -57,4 +57,30 @@ void Workspace::checkFolders() const {
     }
 }
 
+void Workspace::checkClone(const std::string& id) const {
+    const std::filesystem::path clone = cloneDir(id);
+    const std::string problem = clone.string() + " must be a plain folder inside " +
+                                reposDir().string() + ", with no symlinks in it. ";
+    const std::string fix = "Remove the repo and add it again";
+    const std::filesystem::file_status status = std::filesystem::symlink_status(clone);
+    if (!std::filesystem::exists(status)) {
+        throw std::runtime_error(clone.string() + " is missing. " + fix);
+    }
+    // repos/ itself is checked by checkFolders, and IDs can't hold '/' or
+    // "..", so a folder that isn't a symlink is directly inside repos/.
+    if (!std::filesystem::is_directory(status)) {
+        throw std::runtime_error(problem + fix);
+    }
+    // recursive_directory_iterator walks every folder inside. It doesn't
+    // follow symlinks, so it lists each one as a symlink.
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::recursive_directory_iterator(clone)) {
+        if (entry.is_symlink()) {
+            std::string message = problem;
+            message += entry.path().string() + " is a symlink. " + fix;
+            throw std::runtime_error(message);
+        }
+    }
+}
+
 }  // namespace codesearch

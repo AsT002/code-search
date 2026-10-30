@@ -34,7 +34,9 @@ void cloneShallow(const std::string& url, const std::filesystem::path& dest);
 // Brings a clone made by cloneShallow up to date: fetches the commit the
 // remote's default branch points to now (depth 1, no tags), and points the
 // clone's HEAD branch at it. Works after a force-push too. Throws GitError on
-// failure. Only use it on clones we own.
+// failure, or if Git would write outside `clone` (a "commondir" file). Only
+// use it on clones we own, after checking they aren't symlinks
+// (Workspace::checkClone).
 void fetchLatest(const std::filesystem::path& clone);
 
 }  // namespace codesearch

@@ -183,6 +183,12 @@ Status: done. Notes:
 - Both commands use `--git-dir` instead of `-C`. With `-C`, Git looks in the
   folders above a broken clone for another repo, and could move that repo's
   branch.
+- Before fetching, update checks that the clone is a real folder with no
+  symlinks anywhere inside it, and asks Git where it will write
+  (`rev-parse --git-common-dir`). A symlinked clone, a symlinked `refs/`, or a
+  `commondir` file could otherwise make Git move another repo's branch. A
+  missing or redirected clone is an error that says to remove the repo and add
+  it again.
 - Update skips the build only when the commit, `format_version`,
   `policy_version` and `config_fingerprint` all match, and the index file
   opens with a header that matches the registry. It says why it rebuilt: "new

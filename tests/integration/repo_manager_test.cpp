@@ -16,6 +16,7 @@
 
 #include "../support/temp_dir.hpp"
 #include "../support/temp_repo.hpp"
+#include "codesearch/git/git_repo.hpp"
 #include "codesearch/git/git_runner.hpp"
 #include "codesearch/repo/publisher.hpp"
 #include "codesearch/search/searcher.hpp"
@@ -455,6 +456,80 @@ TEST(RepoManager, FailedUpdateKeepsTheOldIndex) {
     EXPECT_EQ(searchAll(workspace, "needle"),
               (std::vector<std::string>{"backend:a.txt", "frontend:app.js"}));
     expectTidy(workspace);
+}
+
+// Each way of pointing the clone at another repo makes update refuse, and
+// that repo's branch stays where it was.
+TEST(RepoManager, UpdateOnlyWritesToItsOwnClone) {
+    TempRepo frontend;
+    fillFrontend(frontend);
+    // A repo of the user's. It has the same remote, so a fetch in it would
+    // work and move its branch.
+    TempRepo victim;
+    victim.write("mine.txt", "mine\n");
+    const ObjectId victimHead = victim.commit();
+    victim.git({"remote", "add", "origin", frontend.dir().string()});
+
+    struct Case {
+        std::string name;
+        std::function<void(const std::filesystem::path& clone)> redirect;
+        std::string error;
+    };
+    const std::vector<Case> cases = {
+        {
+            .name = "the clone is a symlink",
+            .redirect =
+                [&](const std::filesystem::path& clone) {
+                    std::filesystem::remove_all(clone);
+                    std::filesystem::create_directory_symlink(victim.dir() / ".git", clone);
+                },
+            .error = "must be a plain folder",
+        },
+        {
+            .name = "refs/ inside the clone is a symlink",
+            .redirect =
+                [&](const std::filesystem::path& clone) {
+                    std::filesystem::remove_all(clone / "refs");
+                    std::filesystem::create_directory_symlink(victim.dir() / ".git" / "refs",
+                                                              clone / "refs");
+                },
+            .error = "refs is a symlink",
+        },
+        {
+            .name = "a commondir file",
+            .redirect =
+                [&](const std::filesystem::path& clone) {
+                    writeFile(clone / "commondir", (victim.dir() / ".git").string() + "\n");
+                },
+            .error = "Git would write to another folder",
+        },
+        {
+            .name = "the clone is missing",
+            .redirect =
+                [&](const std::filesystem::path& clone) {
+                    std::filesystem::remove_all(clone);
+                },
+            .error = "is missing",
+        },
+    };
+    for (const Case& c : cases) {
+        SCOPED_TRACE(c.name);
+        const TempDir home;
+        const Workspace workspace(home.file("ws"));
+        RepoManager manager(workspace, fakeGitHub(frontend));
+        const std::string id = manager.add("https://github.com/example/frontend", "").repo.id;
+        frontend.write("new.js", "new\n");
+        frontend.commit();
+
+        c.redirect(workspace.cloneDir(id));
+        expectError(
+            [&] {
+                manager.update("frontend", false);
+            },
+            c.error);
+        EXPECT_EQ(GitRepo(victim.dir()).resolveHead(), victimHead);
+        EXPECT_EQ(victim.git({"status", "--porcelain"}).out, "");
+    }
 }
 
 TEST(RepoManager, ChangedSettingsCauseARebuild) {

@@ -433,7 +433,8 @@ code-search add <url|path> [--name n]
   → look up the commit ID once → read files → build → publish
 
 code-search update <name> [--rebuild]
-  (if we own the clone: fetch origin HEAD, move our branch to it)
+  (if we own the clone: check it has no symlinks and Git writes only inside
+   it, then fetch origin HEAD and move our branch to it)
   → look up the commit ID once
   → skip if commit, format_version, policy_version and config_fingerprint all
     match and the index opens fine, unless --rebuild
