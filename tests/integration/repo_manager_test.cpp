@@ -64,7 +64,9 @@ std::set<std::string> namesIn(const std::filesystem::path& dir) {
 std::vector<std::string> searchAll(const Workspace& workspace, const std::string& text,
                                    const std::string& onlyName = "") {
     std::vector<std::string> found;
-    for (const OpenRepo& repo : openRepos(workspace, onlyName)) {
+    const QueryNode query =
+        onlyName.empty() ? literal(text) : allOf({repoFilter(onlyName), literal(text)});
+    for (const OpenRepo& repo : openRepos(workspace, query)) {
         for (const FileMatch& file : search(*repo.index, literal(text)).files) {
             found.push_back(repo.name + ":" + file.path);
         }
@@ -308,7 +310,7 @@ TEST(RepoManager, SearchesWorkDuringAChange) {
     }
 
     // An index that's already open stays readable after remove deletes it.
-    std::vector<OpenRepo> open = openRepos(workspace, "");
+    std::vector<OpenRepo> open = openRepos(workspace, literal("needle"));
     manager.remove("backend");
     EXPECT_TRUE(namesIn(workspace.indexesDir()).empty());  // the file is deleted
     ASSERT_EQ(open.size(), 1U);
@@ -324,7 +326,7 @@ TEST(RepoManager, MissingIndexFileIsAnError) {
     std::filesystem::remove(workspace.indexesDir() / loadRegistry(workspace).repos[0].index.file);
     expectError(
         [&] {
-            openRepos(workspace, "");
+            openRepos(workspace, literal("x"));
         },
         "could not open");
 }
@@ -615,6 +617,37 @@ TEST(RepoManager, BadIndexFilesGetRebuilt) {
     // A good index file, but of another commit than the registry says.
     writeFile(backendFile(), readFile(workspace.indexesDir() / indexFileOf(workspace, "other")));
     expectRebuilt(manager, workspace, "doesn't match the registry");
+}
+
+TEST(RepoManager, OpenReposOpensOnlyWhatTheQueryNeeds) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    TempRepo other;
+    other.write("x.txt", "needle\n");
+    other.commit();
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+    manager.add(other.dir().string(), "other");
+
+    // A damaged backend index doesn't get in the way of searching other.
+    writeFile(workspace.indexesDir() / indexFileOf(workspace, "backend"), "damaged");
+    const std::vector<OpenRepo> opened =
+        openRepos(workspace, allOf({repoFilter("other"), literal("needle")}));
+    ASSERT_EQ(opened.size(), 1U);
+    EXPECT_EQ(opened[0].name, "other");
+    EXPECT_EQ(openRepos(workspace, negate(anyOf({repoFilter("backend")}))).size(), 1U);
+    expectError(
+        [&] {
+            openRepos(workspace, literal("needle"));
+        },
+        "backend: not an index file");
+    expectError(
+        [&] {
+            openRepos(workspace, anyOf({repoFilter("other"), repoFilter("typo")}));
+        },
+        "no repo named typo");
 }
 
 // ---- Killed partway ----

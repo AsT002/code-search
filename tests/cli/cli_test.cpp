@@ -84,7 +84,11 @@ TEST(Cli, DoubleDashAllowsTextStartingWithADash) {
     EXPECT_EQ(result.exitCode, 0);
     EXPECT_EQ(result.out, "flags.sh\n");
 
+    // In a query, '-' in front of text excludes it. Quotes make it text.
     result = searchIn(repo, {"-l", "--", "->"});
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(result.out, "a.txt\nb.txt\n");  // the files without ">"
+    result = searchIn(repo, {"-l", "\"->\""});
     EXPECT_EQ(result.exitCode, 0);
     EXPECT_EQ(result.out, "flags.sh\n");
 
@@ -105,8 +109,12 @@ TEST(Cli, BadArgumentsPrintUsage) {
         {"search", "--path", ".", "--", "a", "--path"},  // same
         {"search", "--path", ".", "--"},                 // nothing after "--"
         {"search", "--path", ".", "--repo", "x", "a"},   // both --path and --repo
-        {"search", "--index", "x", "a"},                 // gone in M4
-        {"index", "--path", ".", "--out", "x"},          // gone in M4
+        {"search", "--path", ".", "-C", "x", "a"},       // -C needs a number
+        {"search", "--path", ".", "-C", "-1", "a"},
+        {"search", "--path", ".", "--max-results", "a"},  // no number, then no query
+        {"search", "--path", ".", "--color=sometimes", "a"},
+        {"search", "--index", "x", "a"},         // gone in M4
+        {"index", "--path", ".", "--out", "x"},  // gone in M4
         {"add"},
         {"add", "--name", "x"},                      // no source
         {"add", ".", "--name"},                      // --name without a value
@@ -181,6 +189,116 @@ TEST(CliErrors, ClosedOutputIsAnError) {
     EXPECT_EQ(exitCode, 2);
     EXPECT_TRUE(contains(search.errorOutput(), "could not write the output"))
         << search.errorOutput();
+}
+
+// ---- Query language and output ----
+
+// A repo for the query tests: a Go file with matches 5 lines apart.
+void fillQueryRepo(TempRepo& repo) {
+    repo.write("a.go", "one\ntwo needle\nthree\nfour\nfive\nsix needle\nseven\n");
+    repo.write("b.py", "needle in python\n");
+    repo.write("c.txt", "nothing\n");
+    repo.commit();
+}
+
+TEST(CliQuery, QueryLanguage) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    EXPECT_EQ(searchIn(repo, {"-l", "needle -lang:go"}).out, "b.py\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "three or python"}).out, "a.go\nb.py\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "path:.txt or (needle path:a.)"}).out, "a.go\nc.txt\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "--", "-needle"}).out, "c.txt\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "case:yes NEEDLE"}).exitCode, 1);
+    EXPECT_EQ(searchIn(repo, {"-l", "case:no NEEDLE", "--case-sensitive"}).out,
+              "a.go\nb.py\n");  // case: wins over the option
+
+    // Nothing to highlight: the file name alone.
+    EXPECT_EQ(searchIn(repo, {"lang:python"}).out, "b.py\n");
+    // Matches only from the branch that matched.
+    EXPECT_EQ(searchIn(repo, {"(three python) or seven"}).out, "a.go:7:1:seven\n");
+}
+
+TEST(CliQuery, QueryErrors) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"(needle", "a ( is missing its )"},
+        {"lang:cobol", "unknown language"},
+        {"repo:x needle", "repo: only works on added repos"},
+    };
+    for (const auto& [query, message] : cases) {
+        const ProcessResult result = searchIn(repo, {query});
+        EXPECT_EQ(result.exitCode, 2) << query;
+        EXPECT_TRUE(contains(result.err, message)) << result.err;
+        EXPECT_EQ(result.out, "");
+    }
+}
+
+TEST(CliQuery, ContextLines) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    EXPECT_EQ(searchIn(repo, {"-C", "1", "needle path:a.go"}).out,
+              "a.go-1-one\n"
+              "a.go:2:5:two needle\n"
+              "a.go-3-three\n"
+              "--\n"
+              "a.go-5-five\n"
+              "a.go:6:5:six needle\n"
+              "a.go-7-seven\n");
+    // Groups that touch are joined, and "--" also goes between files.
+    EXPECT_EQ(searchIn(repo, {"-C", "2", "needle"}).out,
+              "a.go-1-one\n"
+              "a.go:2:5:two needle\n"
+              "a.go-3-three\n"
+              "a.go-4-four\n"
+              "a.go-5-five\n"
+              "a.go:6:5:six needle\n"
+              "a.go-7-seven\n"
+              "--\n"
+              "b.py:1:1:needle in python\n");
+}
+
+TEST(CliQuery, MaxResults) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    ProcessResult result = searchIn(repo, {"--max-results", "2", "needle"});
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(result.out, "a.go:2:5:two needle\na.go:6:5:six needle\n");
+    EXPECT_TRUE(contains(result.err, "stopped after 2 results")) << result.err;
+
+    result = searchIn(repo, {"--max-results", "3", "needle"});
+    EXPECT_EQ(result.out, "a.go:2:5:two needle\na.go:6:5:six needle\nb.py:1:1:needle in python\n");
+    EXPECT_FALSE(contains(result.err, "stopped")) << result.err;
+
+    result = searchIn(repo, {"-l", "--max-results", "1", "needle"});
+    EXPECT_EQ(result.out, "a.go\n");
+}
+
+TEST(CliQuery, Json) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    ProcessResult result = searchIn(repo, {"--json", "--max-results", "1", "needle"});
+    EXPECT_EQ(result.exitCode, 0);
+    EXPECT_EQ(result.out,
+              "{\"files\":[\n"
+              R"({"repo":"","path":"a.go","lines":[{"line":2,"text":"two needle",)"
+              R"("matches":[{"start":4,"end":10}]}]})"
+              "\n],\"status\":\"truncated\"}\n");
+
+    result = searchIn(repo, {"--json", "nothing like this"});
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_EQ(result.out, "{\"files\":[],\"status\":\"complete\"}\n");
+}
+
+TEST(CliQuery, Color) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    EXPECT_EQ(searchIn(repo, {"--color=always", "three"}).out,
+              "\033[35ma.go\033[0m\033[36m:\033[0m\033[32m3\033[0m\033[36m:\033[0m"
+              "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mthree\033[0m\n");
+    // Output to a pipe isn't a terminal, so auto means no color.
+    EXPECT_EQ(searchIn(repo, {"three"}).out, "a.go:3:1:three\n");
+    EXPECT_EQ(searchIn(repo, {"--color=never", "three"}).out, "a.go:3:1:three\n");
 }
 
 // ---- Added repos ----
@@ -267,6 +385,18 @@ TEST(CliRepos, SearchesEveryRepoInNameOrder) {
     const ProcessResult unknown = codeSearch({"search", "--repo", "nope", "needle"}, home.dir());
     EXPECT_EQ(unknown.exitCode, 2);
     EXPECT_TRUE(contains(unknown.err, "no repo named nope")) << unknown.err;
+
+    // repo: in the query. Each repo gets only its own part of an or.
+    EXPECT_EQ(codeSearch({"search", "-l", "needle -repo:zeta"}, home.dir()).out, "alpha:x.txt\n");
+    EXPECT_EQ(
+        codeSearch({"search", "-l", "(repo:alpha x.txt) or (repo:zeta needle)"}, home.dir()).out,
+        "zeta:y.txt\n");
+    EXPECT_EQ(
+        codeSearch({"search", "-l", "--repo", "alpha", "repo:zeta needle"}, home.dir()).exitCode,
+        1);
+    const ProcessResult unknownInQuery = codeSearch({"search", "repo:nope x"}, home.dir());
+    EXPECT_EQ(unknownInQuery.exitCode, 2);
+    EXPECT_TRUE(contains(unknownInQuery.err, "no repo named nope")) << unknownInQuery.err;
 }
 
 TEST(CliRepos, UpdatePicksUpNewCommits) {

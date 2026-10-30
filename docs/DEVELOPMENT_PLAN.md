@@ -223,13 +223,39 @@ old index usable. We record how long a one-file change takes.
 
 ## M6: Query language and output
 
+Status: done. Notes:
+
+- The meaning table in the architecture doc is locked in, with rows added for
+  `or`, `-`, quotes, parentheses inside words, highlighting, `lang:`, errors
+  and line endings. The output formats are described there too.
+- `parseQuery` is a recursive descent parser over shell-like words. Only
+  `repo`, `path`, `file`, `lang` and `case` typed plainly before a `:` are
+  filters, so `std::string` and `"path:x"` are text. Nesting is limited to 100
+  levels. A random-input test checks it only ever throws `QueryError`.
+- There's no `RepoSelection` type. Each repo gets the query with `repo:`
+  resolved (`resolveRepo`), and is skipped when that makes it false.
+  `openRepos` does the same, so a damaged index in one repo doesn't stop a
+  search limited to another.
+- The differential test found a bug in the first version: an `or` that
+  became true for a repo was replaced by true, so its other branches lost
+  their highlights. An `or` now keeps the true next to its other children.
+- `or` merges posting lists. `-`, `path:` and `lang:` plan as `All`.
+- `searchRepos` streams files out and stops at the limit, so a limited
+  search reads only the files it shows plus one. On golang/go, `--max-results
+  5` used 2.7 MB of memory.
+- Results are in path order because Git lists a tree in the byte order of
+  full paths (a folder sorts as its name plus `/`). A test pins this.
+- Ctrl-C sets a flag the search checks before each file. The second Ctrl-C
+  stops the program right away. There's no automated test of the signal
+  itself; `searchRepos` tests the flag.
+- `file:` is the same as `path:` until regex arrives in M8.
+
 - Lock in the query meaning table from the architecture doc: matching within a
   file, what limits count, result order, what `path:`, `file:` and `repo:` mean,
   escaping and precedence.
 - `Parser`: `repo:`, `path:`, `file:`, `lang:`, `case:yes`, `-` to exclude, quoted
   text, `or`, parentheses.
-- The planner keeps the whole query, simplifies it per repo, and uses
-  `RepoSelection` (`AllRepos`, `SelectedRepos`, `NoRepos`).
+- The planner keeps the whole query and simplifies it per repo.
 - Turn queries into trigrams using the table in the architecture doc. `or` must
   give correct results here, either by merging posting lists or by falling back
   to `All`. M7 only makes it faster.

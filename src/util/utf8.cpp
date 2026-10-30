@@ -44,26 +44,53 @@ LeadByte readLead(unsigned char byte) {
     return {};  // 80 to C1, F5 to FF: never valid as a first byte
 }
 
+// The length of the valid character starting at text[i], or 0 if there
+// isn't one there.
+std::size_t validLength(std::string_view text, std::size_t i) {
+    const LeadByte lead = readLead(static_cast<unsigned char>(text[i]));
+    if (lead.length == 0 || lead.length > text.size() - i) {
+        return 0;  // bad first byte, or the text ends mid-character
+    }
+    for (std::size_t k = 1; k < lead.length; ++k) {
+        const auto byte = static_cast<unsigned char>(text[i + k]);
+        const unsigned char low = k == 1 ? lead.secondMin : 0x80;
+        const unsigned char high = k == 1 ? lead.secondMax : 0xBF;
+        if (byte < low || byte > high) {
+            return 0;
+        }
+    }
+    return lead.length;
+}
+
 }  // namespace
 
 bool isValidUtf8(std::string_view text) {
     std::size_t i = 0;
     while (i < text.size()) {
-        const LeadByte lead = readLead(static_cast<unsigned char>(text[i]));
-        if (lead.length == 0 || lead.length > text.size() - i) {
-            return false;  // bad first byte, or the text ends mid-character
+        const std::size_t length = validLength(text, i);
+        if (length == 0) {
+            return false;
         }
-        for (std::size_t k = 1; k < lead.length; ++k) {
-            const auto byte = static_cast<unsigned char>(text[i + k]);
-            const unsigned char low = k == 1 ? lead.secondMin : 0x80;
-            const unsigned char high = k == 1 ? lead.secondMax : 0xBF;
-            if (byte < low || byte > high) {
-                return false;
-            }
-        }
-        i += lead.length;
+        i += length;
     }
     return true;
+}
+
+std::string replaceInvalidUtf8(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const std::size_t length = validLength(text, i);
+        if (length == 0) {
+            out += "\xEF\xBF\xBD";  // U+FFFD in UTF-8
+            ++i;
+        } else {
+            out.append(text.substr(i, length));
+            i += length;
+        }
+    }
+    return out;
 }
 
 }  // namespace codesearch

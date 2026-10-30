@@ -317,12 +317,12 @@ struct VerifyRound {
 
 void checkFile(const Evaluator& evaluator, std::string_view content, Work work,
                VerifyRound& round) {
-    if (!evaluator.matches(content)) {
+    if (!evaluator.matches("", content)) {  // literal queries only, so the path is unused
         return;
     }
     ++round.matchedFiles;
     if (work == Work::FullSearch) {
-        round.matches += locate(content, evaluator.collectSpans(content)).size();
+        round.matches += locate(content, evaluator.collectSpans("", content)).size();
     }
 }
 

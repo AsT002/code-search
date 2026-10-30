@@ -37,5 +37,16 @@ TEST(IsValidUtf8, RejectsOverlongSurrogatesAndTooHigh) {
     EXPECT_FALSE(isValidUtf8("\xF4\x90\x80\x80"));  // U+110000, too high
 }
 
+TEST(ReplaceInvalidUtf8, ReplacesEachBadByte) {
+    EXPECT_EQ(replaceInvalidUtf8("caf\xC3\xA9"), "caf\xC3\xA9");
+    EXPECT_EQ(replaceInvalidUtf8("a\xFF"
+                                 "b"),
+              "a\xEF\xBF\xBD"
+              "b");
+    // A cut-off character: each of its bytes is replaced.
+    EXPECT_EQ(replaceInvalidUtf8("\xE2\x82"), "\xEF\xBF\xBD\xEF\xBF\xBD");
+    EXPECT_TRUE(isValidUtf8(replaceInvalidUtf8("\xC0\x80\xED\xA0\x80\xF5")));
+}
+
 }  // namespace
 }  // namespace codesearch

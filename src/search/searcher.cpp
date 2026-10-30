@@ -30,27 +30,45 @@ std::vector<Match> locate(std::string_view content, std::span<const Span> spans)
     return matches;
 }
 
-SearchResults search(const IndexReader& index, const QueryNode& query,
-                     const SearchOptions& options) {
+SearchStatus forEachMatch(
+    const IndexReader& index, const QueryNode& query, const SearchOptions& options,
+    const std::function<bool(const FileMatch& file, std::string_view content)>& onFile,
+    const std::atomic<bool>* cancelled) {
     // 1. Use the index to find files that might match.
-    const TrigramQuery plan = planCandidates(query);
-    const std::vector<DocId> candidates = findCandidates(index, plan);
+    const std::vector<DocId> candidates = findCandidates(index, planCandidates(query));
 
-    // 2. Check each one for real and record what matched.
+    // 2. Check each one for real and pass on what matched.
     const Evaluator evaluator(query, options);
-    SearchResults results;
     for (const DocId doc : candidates) {
+        if (cancelled != nullptr && cancelled->load()) {
+            return SearchStatus::Cancelled;
+        }
+        const std::string_view path = index.path(doc);
+        bool keepGoing = true;
         index.withContent(doc, [&](std::string_view content) {
-            if (!evaluator.matches(content)) {
+            if (!evaluator.matches(path, content)) {
                 return;  // the trigrams were there, but the text isn't
             }
             FileMatch file;
             file.doc = doc;
-            file.path = std::string(index.path(doc));
-            file.matches = locate(content, evaluator.collectSpans(content));
-            results.files.push_back(file);
+            file.path = std::string(path);
+            file.matches = locate(content, evaluator.collectSpans(path, content));
+            keepGoing = onFile(file, content);
         });
+        if (!keepGoing) {
+            return SearchStatus::Truncated;
+        }
     }
+    return SearchStatus::Complete;
+}
+
+SearchResults search(const IndexReader& index, const QueryNode& query,
+                     const SearchOptions& options) {
+    SearchResults results;
+    forEachMatch(index, query, options, [&](const FileMatch& file, std::string_view) {
+        results.files.push_back(file);
+        return true;
+    });
     return results;
 }
 

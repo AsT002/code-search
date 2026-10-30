@@ -31,8 +31,14 @@ struct AndQuery {
     friend bool operator==(const AndQuery&, const AndQuery&) = default;
 };
 
+// Docs that match at least one child.
+struct OrQuery {
+    std::vector<TrigramQuery> children;
+    friend bool operator==(const OrQuery&, const OrQuery&) = default;
+};
+
 struct TrigramQuery {
-    std::variant<AllQuery, NoneQuery, TrigramTerm, AndQuery> value;
+    std::variant<AllQuery, NoneQuery, TrigramTerm, AndQuery, OrQuery> value;
     friend bool operator==(const TrigramQuery&, const TrigramQuery&) = default;
 };
 

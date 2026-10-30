@@ -117,6 +117,23 @@ TEST(GitRepo, ListsFilesWithKindsAndSizes) {
     EXPECT_EQ(entries[3].id, first);
 }
 
+TEST(GitRepo, ListsFilesSortedByPathBytes) {
+    TempRepo repo;
+    // Git sorts a folder as its name plus '/', so its tree order is the byte
+    // order of the full paths. Doc IDs follow it, and search results are in
+    // path order because of that.
+    for (const std::string name : {"a0", "a/z", "a/b", "a.b", "a-b", "B", "\xC3\xA9"}) {
+        repo.write(name, "x");
+    }
+    const ObjectId commit = repo.commit();
+    std::vector<std::string> listed;
+    for (const TreeEntry& entry : GitRepo(repo.dir()).listFiles(commit)) {
+        listed.push_back(entry.path);
+    }
+    EXPECT_EQ(listed,
+              (std::vector<std::string>{"B", "a-b", "a.b", "a/b", "a/z", "a0", "\xC3\xA9"}));
+}
+
 TEST(GitRepo, KeepsUnusualFileNames) {
     TempRepo repo;
     const std::vector<std::string> names = {

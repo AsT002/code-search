@@ -91,5 +91,20 @@ TEST(FindCandidates, NestedAnd) {
     EXPECT_EQ(findCandidates(index, outer), (std::vector<DocId>{2}));
 }
 
+TEST(FindCandidates, OrMergesWithoutRepeats) {
+    const MemoryIndex index = sampleIndex();
+    const TrigramQuery query =
+        planCandidates(anyOf({literal("hello"), literal("say"), literal("zzz")}));
+    // "hello" is in 0 and 2, "say" in 2, "zzz" nowhere.
+    EXPECT_EQ(findCandidates(index, query), (std::vector<DocId>{0, 2}));
+    EXPECT_TRUE(findCandidates(index, {OrQuery{}}).empty());
+}
+
+TEST(FindCandidates, OrInsideAnd) {
+    const MemoryIndex index = sampleIndex();
+    const QueryNode query = allOf({literal("hello"), anyOf({literal("say"), literal("zzz")})});
+    EXPECT_EQ(findCandidates(index, planCandidates(query)), (std::vector<DocId>{2}));
+}
+
 }  // namespace
 }  // namespace codesearch

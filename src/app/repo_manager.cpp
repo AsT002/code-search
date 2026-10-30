@@ -10,6 +10,7 @@
 #include "codesearch/index/file_filter.hpp"
 #include "codesearch/index/index_file_error.hpp"
 #include "codesearch/index/shard_format.hpp"
+#include "codesearch/query/planner.hpp"
 #include "codesearch/repo/github_url.hpp"
 #include "codesearch/repo/publisher.hpp"
 #include "codesearch/util/file_lock.hpp"
@@ -309,18 +310,20 @@ Registry loadRegistry(const Workspace& workspace) {
     return JsonRegistryStore(workspace.registryFile()).load();
 }
 
-std::vector<OpenRepo> openRepos(const Workspace& workspace, const std::string& onlyName) {
+std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query) {
     for (int attempt = 1;; ++attempt) {
         const Registry registry = loadRegistry(workspace);
-        if (!onlyName.empty() && registry.find(onlyName) == nullptr) {
-            throw std::runtime_error("no repo named " + onlyName);
+        for (const std::string& name : repoNamesIn(query)) {
+            if (registry.find(name) == nullptr) {
+                throw std::runtime_error("no repo named " + name);
+            }
         }
 
         std::vector<OpenRepo> opened;
         bool fileWentAway = false;
         for (const RepoEntry& repo : registry.repos) {
-            if (!onlyName.empty() && repo.name != onlyName) {
-                continue;
+            if (resolveRepo(query, repo.name) == constant(false)) {
+                continue;  // nothing in this repo can match
             }
             const std::filesystem::path path = workspace.indexesDir() / repo.index.file;
             try {

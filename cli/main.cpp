@@ -1,5 +1,10 @@
+#include <unistd.h>
+
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <csignal>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iostream>
@@ -14,7 +19,10 @@
 #include "codesearch/git/git_runner.hpp"
 #include "codesearch/index/index_file_error.hpp"
 #include "codesearch/index/shard_reader.hpp"
-#include "codesearch/search/searcher.hpp"
+#include "codesearch/query/parser.hpp"
+#include "codesearch/query/planner.hpp"
+#include "codesearch/search/json_output.hpp"
+#include "codesearch/search/repo_search.hpp"
 #include "codesearch/version.hpp"
 
 namespace {
@@ -27,56 +35,134 @@ void printUsage(std::ostream& out) {
            "  code-search list\n"
            "  code-search update <name> [--rebuild]\n"
            "  code-search remove <name>\n"
-           "  code-search search [--repo <name>] [--case-sensitive] [-l] [--] <text>\n"
-           "  code-search search --path <folder> [--case-sensitive] [-l] [--] <text>\n"
+           "  code-search search [options] [--] <query>\n"
            "  code-search verify <name>\n"
            "  code-search --version\n"
            "  code-search --help\n"
            "\n"
-           "search looks in every added repo, or only in --repo. With --path it\n"
-           "indexes a repo you haven't added, in memory, every time.\n"
-           "Use -- before text that starts with a dash, like: -- --flag\n"
+           "search options:\n"
+           "  --repo <name>         only this added repo (same as repo:<name>)\n"
+           "  --path <folder>       a repo you haven't added, indexed in memory each time\n"
+           "  --case-sensitive      match case (same as case:yes)\n"
+           "  -l                    print only the paths of matching files\n"
+           "  -C <n>                show n lines before and after each match\n"
+           "  --max-results <n>     stop after n matching lines (files with -l)\n"
+           "  --json                print the results as JSON\n"
+           "  --color=<when>        auto (the default), always or never\n"
+           "\n"
+           "query:\n"
+           "  foo bar               both, anywhere in the same file\n"
+           "  foo or bar            either one\n"
+           "  -foo                  files without foo\n"
+           "  (a or b) c            parentheses group\n"
+           "  \"foo bar\"             quotes keep spaces and words like or\n"
+           "  repo:x path:x file:x lang:go case:yes\n"
+           "\n"
+           "Put the query in quotes so the shell passes it as one argument. Use --\n"
+           "before a query that starts with a dash, like: -- '-test foo'\n"
            "Data is kept in ~/.code-search, or in $CODE_SEARCH_HOME if it's set.\n";
 }
+
+enum class Color {
+    Auto,
+    Always,
+    Never,
+};
 
 struct SearchArgs {
     std::string repoName;  // only this added repo; empty means all of them
     std::string repoPath;  // or a repo that isn't added, indexed in memory
-    std::string text;
+    std::string query;
     bool caseSensitive = false;
     bool filesOnly = false;  // -l: print only the paths of matching files
+    std::size_t maxResults = 0;
+    std::size_t contextLines = 0;
+    bool json = false;
+    Color color = Color::Auto;
 };
+
+// Reads a whole non-negative number. Nothing if `text` is anything else.
+std::optional<std::size_t> parseCount(std::string_view text) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc() || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+// Sets a search option that takes no value, like -l. Returns false if
+// `arg` isn't one.
+bool readFlag(std::string_view arg, SearchArgs& result) {
+    if (arg == "--case-sensitive") {
+        result.caseSensitive = true;
+    } else if (arg == "-l") {
+        result.filesOnly = true;
+    } else if (arg == "--json") {
+        result.json = true;
+    } else if (arg == "--color=auto") {
+        result.color = Color::Auto;
+    } else if (arg == "--color=always") {
+        result.color = Color::Always;
+    } else if (arg == "--color=never") {
+        result.color = Color::Never;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Sets a search option that takes a value, like --repo <name>. Returns false
+// if `arg` isn't one, or the value is wrong.
+bool readOption(std::string_view arg, std::string_view value, SearchArgs& result) {
+    if (arg == "--repo") {
+        result.repoName = value;
+    } else if (arg == "--path") {
+        result.repoPath = value;
+    } else if (arg == "--max-results" || arg == "-C") {
+        const std::optional<std::size_t> count = parseCount(value);
+        if (!count.has_value()) {
+            return false;
+        }
+        if (arg == "-C") {
+            result.contextLines = count.value();
+        } else {
+            result.maxResults = count.value();
+        }
+    } else {
+        return false;
+    }
+    return true;
+}
 
 // Reads the arguments after "search". Returns nothing if they don't make sense.
 std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
     SearchArgs result;
-    bool haveText = false;
+    bool haveQuery = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
-        if (arg == "--repo" && i + 1 < args.size()) {
-            ++i;
-            result.repoName = args[i];
-        } else if (arg == "--path" && i + 1 < args.size()) {
-            ++i;
-            result.repoPath = args[i];
-        } else if (arg == "--case-sensitive") {
-            result.caseSensitive = true;
-        } else if (arg == "-l") {
-            result.filesOnly = true;
-        } else if (arg == "--" && !haveText && i + 2 == args.size()) {
-            // Everything after "--" is the text, even if it starts with a dash.
-            ++i;
-            result.text = args[i];
-            haveText = true;
-        } else if (!haveText && (!arg.starts_with('-') || arg == "-")) {
-            result.text = arg;
-            haveText = true;
-        } else {
-            return std::nullopt;
+        if (readFlag(arg, result)) {
+            continue;
         }
+        if (i + 1 < args.size() && readOption(arg, args[i + 1], result)) {
+            ++i;  // the value is used up too
+            continue;
+        }
+        if (haveQuery) {
+            return std::nullopt;  // a second query, or a bad option after it
+        }
+        if (arg == "--" && i + 2 == args.size()) {
+            // Everything after "--" is the query, even if it starts with a dash.
+            result.query = args[++i];
+        } else if (!arg.starts_with('-') || arg == "-") {
+            result.query = arg;
+        } else {
+            return std::nullopt;  // an unknown option, or one missing its value
+        }
+        haveQuery = true;
     }
     // --repo and --path can't be used together.
-    if ((!result.repoName.empty() && !result.repoPath.empty()) || !haveText) {
+    if ((!result.repoName.empty() && !result.repoPath.empty()) || !haveQuery) {
         return std::nullopt;
     }
     return result;
@@ -107,26 +193,6 @@ std::optional<AddArgs> parseAddArgs(std::span<char*> args) {
     return result;
 }
 
-// The full line around byte `offset`, without its line ending.
-std::string_view lineAt(std::string_view content, std::size_t offset) {
-    std::size_t start = 0;
-    if (offset > 0) {
-        const std::size_t newline = content.rfind('\n', offset - 1);
-        if (newline != std::string_view::npos) {
-            start = newline + 1;
-        }
-    }
-    std::size_t end = content.find('\n', offset);
-    if (end == std::string_view::npos) {
-        end = content.size();
-    }
-    std::string_view line = content.substr(start, end - start);
-    if (!line.empty() && line.back() == '\r') {
-        line.remove_suffix(1);
-    }
-    return line;
-}
-
 void printReport(const ObjectId& commit, const IngestReport& report) {
     std::cerr << "commit " << commit.hex() << ": indexed " << report.indexed.files << " files ("
               << report.indexed.bytes << " bytes)";
@@ -155,58 +221,179 @@ std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& fi
     return result;
 }
 
-// Prints the matches in one index. `prefix` goes before each path, like
-// "my-backend:" when searching added repos. Returns true if anything matched.
-bool printResults(const IndexReader& index, const SearchArgs& args, const std::string& prefix) {
-    SearchOptions options;
-    options.caseSensitive = args.caseSensitive;
-    const SearchResults results = search(index, literal(args.text), options);
+// Escape codes that color text in a terminal, like grep's colors.
+struct Colors {
+    std::string_view path;
+    std::string_view number;
+    std::string_view separator;
+    std::string_view match;
+    std::string_view reset;
+};
 
-    for (const FileMatch& file : results.files) {
-        if (!std::cout) {
-            break;  // output failed, so the rest would be lost too
-        }
-        if (args.filesOnly) {
-            std::cout << prefix << file.path << '\n';
-            continue;
-        }
-        index.withContent(file.doc, [&](std::string_view content) {
-            std::size_t lastLine = 0;
-            for (const Match& match : file.matches) {
-                if (match.line == lastLine) {
-                    continue;  // print each line once, even with several matches on it
-                }
-                lastLine = match.line;
-                std::cout << prefix << file.path << ':' << match.line << ':' << match.column << ':'
-                          << lineAt(content, match.bytes.begin) << '\n';
-            }
-        });
+Colors pickColors(Color color) {
+    bool on = color == Color::Always;
+    if (color == Color::Auto) {
+        // Only on a terminal, and not if the user turned colors off
+        // (https://no-color.org) or the terminal can't show them.
+        const char* noColor = std::getenv("NO_COLOR");  // NOLINT(concurrency-mt-unsafe)
+        const char* term = std::getenv("TERM");         // NOLINT(concurrency-mt-unsafe)
+        on = ::isatty(STDOUT_FILENO) == 1 && (noColor == nullptr || *noColor == '\0') &&
+             (term == nullptr || std::string_view(term) != "dumb");
     }
-    return !results.files.empty();
+    if (!on) {
+        return {};
+    }
+    return {
+        .path = "\033[35m",       // magenta
+        .number = "\033[32m",     // green
+        .separator = "\033[36m",  // cyan
+        .match = "\033[1;31m",    // bold red
+        .reset = "\033[0m",
+    };
+}
+
+// Prints a line's text with its matches colored.
+void printHighlighted(const ResultLine& line, const Colors& colors) {
+    std::size_t done = 0;
+    for (const Span& span : line.matches) {
+        if (span.begin < done) {
+            continue;  // overlaps one we printed already
+        }
+        std::cout << std::string_view(line.text).substr(done, span.begin - done) << colors.match
+                  << std::string_view(line.text).substr(span.begin, span.end - span.begin)
+                  << colors.reset;
+        done = span.end;
+    }
+    std::cout << std::string_view(line.text).substr(done);
+}
+
+// Prints one file's results, grep style:
+//   repo:path:line:column:text   a line with a match
+//   repo:path-line-text          a context line (with -C)
+//   repo:path                    with -l, or when there's nothing to highlight
+// With -C, "--" goes between groups of lines that aren't next to each other.
+class TextPrinter {
+public:
+    TextPrinter(std::size_t contextLines, Colors colors)
+        : contextLines_(contextLines), colors_(colors) {}
+
+    void file(const ResultFile& file) {
+        const std::string prefix = file.repo.empty() ? "" : file.repo + ":";
+        if (file.lines.empty()) {
+            std::cout << colors_.path << prefix << file.path << colors_.reset << '\n';
+            return;
+        }
+        std::size_t previous = 0;
+        for (const ResultLine& line : file.lines) {
+            const bool gap = previous == 0 || line.number != previous + 1;
+            if (contextLines_ > 0 && gap && printedLines_) {
+                std::cout << colors_.separator << "--" << colors_.reset << '\n';
+            }
+            const char separator = line.matches.empty() ? '-' : ':';
+            std::cout << colors_.path << prefix << file.path << colors_.reset << colors_.separator
+                      << separator << colors_.reset << colors_.number << line.number
+                      << colors_.reset << colors_.separator << separator << colors_.reset;
+            if (!line.matches.empty()) {
+                std::cout << colors_.number << line.matches[0].begin + 1 << colors_.reset
+                          << colors_.separator << ':' << colors_.reset;
+            }
+            printHighlighted(line, colors_);
+            std::cout << '\n';
+            previous = line.number;
+            printedLines_ = true;
+        }
+    }
+
+private:
+    std::size_t contextLines_;
+    Colors colors_;
+    bool printedLines_ = false;
+};
+
+// Set by Ctrl-C while a search runs. Signal handlers may only touch
+// lock-free atomics like this one, and a handler can't be given arguments,
+// so it has to be a global.
+std::atomic<bool> gCancelled = false;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static_assert(std::atomic<bool>::is_always_lock_free);
+
+extern "C" void onInterrupt(int /*signal*/) {
+    gCancelled = true;
+    // A second Ctrl-C stops the program right away. signal() is safe to
+    // call in a handler.
+    static_cast<void>(std::signal(SIGINT, SIG_DFL));
 }
 
 int runSearch(const SearchArgs& args) {
+    const ParsedQuery parsed = parseQuery(args.query);
+    SearchRequest request{
+        .query = parsed.root,
+        .options = {.caseSensitive = parsed.caseSensitive.value_or(args.caseSensitive)},
+        .maxResults = args.maxResults,
+        .contextLines = args.contextLines,
+        .filesOnly = args.filesOnly,
+        .cancelled = &gCancelled,
+    };
+
+    std::vector<SearchTarget> targets;
+    std::optional<BuiltRepo> built;  // with --path
+    std::vector<OpenRepo> repos;     // otherwise
     if (!args.repoPath.empty()) {
-        const std::optional<BuiltRepo> repo = buildRepo(args.repoPath, FileFilter());
-        if (!repo.has_value()) {
+        if (!repoNamesIn(request.query).empty()) {
+            throw QueryError("repo: only works on added repos, not with --path");
+        }
+        built = buildRepo(args.repoPath, FileFilter());
+        if (!built.has_value()) {
             return 1;
         }
-        return printResults(repo->built.index, args, "") ? 0 : 1;
+        targets.push_back({.name = "", .index = &built->built.index});
+    } else {
+        const Workspace workspace(Workspace::defaultRoot());
+        if (loadRegistry(workspace).repos.empty()) {
+            std::cerr
+                << "code-search: no repos added yet. Add one with: code-search add <folder>\n";
+            return 2;
+        }
+        if (!args.repoName.empty()) {
+            request.query = allOf({repoFilter(args.repoName), request.query});
+        }
+        repos = openRepos(workspace, request.query);
+        for (const OpenRepo& repo : repos) {
+            targets.push_back({.name = repo.name, .index = repo.index.get()});
+        }
     }
 
-    const std::vector<OpenRepo> repos =
-        openRepos(Workspace(Workspace::defaultRoot()), args.repoName);
-    if (repos.empty()) {
-        std::cerr << "code-search: no repos added yet. Add one with: code-search add <folder>\n";
-        return 2;
-    }
     bool found = false;
-    for (const OpenRepo& repo : repos) {
-        try {
-            found = printResults(*repo.index, args, repo.name + ":") || found;
-        } catch (const IndexFileError& error) {
-            throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
-        }
+    std::optional<JsonResultWriter> json;
+    if (args.json) {
+        json.emplace(std::cout);
+    }
+    TextPrinter text(args.contextLines, pickColors(args.color));
+
+    static_cast<void>(std::signal(SIGINT, onInterrupt));
+    SearchStatus status = SearchStatus::Complete;
+    try {
+        status = searchRepos(targets, request, [&](const ResultFile& file) {
+            found = true;
+            if (json.has_value()) {
+                json->file(file);
+            } else {
+                text.file(file);
+            }
+        });
+    } catch (const RepoIndexError& error) {
+        throw IndexFileError(error.what() + rebuildHint(error.repo()));
+    }
+    static_cast<void>(std::signal(SIGINT, SIG_DFL));
+
+    if (json.has_value()) {
+        json->finish(status);
+    } else if (status == SearchStatus::Truncated) {
+        std::cerr << "code-search: stopped after " << args.maxResults
+                  << " results (--max-results); there are more\n";
+    }
+    if (status == SearchStatus::Cancelled) {
+        std::cerr << "code-search: cancelled\n";
+        return 130;  // what shells use for "stopped by Ctrl-C"
     }
     return found ? 0 : 1;  // like grep: 1 means nothing found
 }

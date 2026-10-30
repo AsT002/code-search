@@ -1,6 +1,8 @@
 #include "codesearch/search/candidates.hpp"
 
 #include <algorithm>
+#include <iterator>
+#include <utility>
 
 namespace codesearch {
 
@@ -94,6 +96,22 @@ std::vector<DocId> evaluateAnd(const IndexReader& index, const AndQuery& query) 
     return intersect(cursors);
 }
 
+// Docs in at least one child's list. Each child's docs come back sorted, so
+// set_union merges two lists into one sorted list without repeats.
+std::vector<DocId> evaluateOr(const IndexReader& index, const OrQuery& query) {
+    std::vector<DocId> result;
+    for (const TrigramQuery& child : query.children) {
+        const std::vector<DocId> docs = findCandidates(index, child);
+        std::vector<DocId> merged;
+        merged.reserve(result.size() + docs.size());
+        // back_inserter makes set_union add each doc with push_back.
+        std::set_union(result.begin(), result.end(), docs.begin(), docs.end(),
+                       std::back_inserter(merged));
+        result = std::move(merged);
+    }
+    return result;
+}
+
 }  // namespace
 
 std::vector<DocId> findCandidates(const IndexReader& index, const TrigramQuery& query) {
@@ -109,6 +127,9 @@ std::vector<DocId> findCandidates(const IndexReader& index, const TrigramQuery& 
             return {};
         }
         return toVector(cursor.value());
+    }
+    if (const auto* orQuery = std::get_if<OrQuery>(&query.value)) {
+        return evaluateOr(index, *orQuery);
     }
     return evaluateAnd(index, std::get<AndQuery>(query.value));
 }

@@ -48,29 +48,91 @@ std::vector<Span> occurrences(std::string_view text, std::string_view pattern, b
     return spans;
 }
 
-bool fileMatches(std::string_view text, const QueryNode& query, bool caseSensitive) {
-    if (const auto* lit = std::get_if<LiteralNode>(&query.value)) {
-        return lit->text.empty() || !occurrences(text, lit->text, caseSensitive).empty();
-    }
-    for (const QueryNode& child : std::get<AndNode>(query.value).children) {
-        if (!fileMatches(text, child, caseSensitive)) {
-            return false;
-        }
-    }
-    return true;
+bool contains(std::string_view text, std::string_view pattern, bool caseSensitive) {
+    return pattern.empty() || !occurrences(text, pattern, caseSensitive).empty();
 }
 
-void allSpans(std::string_view text, const QueryNode& query, bool caseSensitive,
-              std::vector<Span>& out) {
+std::string_view languageOfTestPath(std::string_view path) {
+    if (path.ends_with(".go")) {
+        return "go";
+    }
+    if (path.ends_with(".py")) {
+        return "python";
+    }
+    if (path == "Makefile" || path.ends_with("/Makefile")) {
+        return "make";
+    }
+    return "";
+}
+
+// Everything the query can look at for one file.
+struct FileView {
+    std::string_view repo;
+    std::string_view path;
+    std::string_view content;
+    bool caseSensitive = false;
+};
+
+bool fileMatches(const FileView& file, const QueryNode& query) {
     if (const auto* lit = std::get_if<LiteralNode>(&query.value)) {
-        for (const Span span : occurrences(text, lit->text, caseSensitive)) {
+        return contains(file.content, lit->text, file.caseSensitive);
+    }
+    if (const auto* path = std::get_if<PathNode>(&query.value)) {
+        return contains(file.path, path->text, file.caseSensitive);
+    }
+    if (const auto* lang = std::get_if<LangNode>(&query.value)) {
+        return languageOfTestPath(file.path) == lang->name;
+    }
+    if (const auto* repo = std::get_if<RepoNode>(&query.value)) {
+        return repo->name == file.repo;
+    }
+    if (const auto* known = std::get_if<ConstNode>(&query.value)) {
+        return known->value;
+    }
+    if (const auto* andNode = std::get_if<AndNode>(&query.value)) {
+        for (const QueryNode& child : andNode->children) {
+            if (!fileMatches(file, child)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (const auto* orNode = std::get_if<OrNode>(&query.value)) {
+        for (const QueryNode& child : orNode->children) {
+            if (fileMatches(file, child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return !fileMatches(file, std::get<NotNode>(query.value).child[0]);
+}
+
+// The text to highlight, from the parts of the query that matched.
+void allSpans(const FileView& file, const QueryNode& query, std::vector<Span>& out) {
+    if (const auto* lit = std::get_if<LiteralNode>(&query.value)) {
+        for (const Span span : occurrences(file.content, lit->text, file.caseSensitive)) {
             out.push_back(span);
         }
-        return;
+    } else if (const auto* andNode = std::get_if<AndNode>(&query.value)) {
+        for (const QueryNode& child : andNode->children) {
+            allSpans(file, child, out);
+        }
+    } else if (const auto* orNode = std::get_if<OrNode>(&query.value)) {
+        for (const QueryNode& child : orNode->children) {
+            if (fileMatches(file, child)) {
+                allSpans(file, child, out);
+            }
+        }
     }
-    for (const QueryNode& child : std::get<AndNode>(query.value).children) {
-        allSpans(text, child, caseSensitive, out);
-    }
+}
+
+std::vector<Span> sortedSpans(const FileView& file, const QueryNode& query) {
+    std::vector<Span> spans;
+    allSpans(file, query, spans);
+    std::sort(spans.begin(), spans.end());
+    spans.erase(std::unique(spans.begin(), spans.end()), spans.end());
+    return spans;
 }
 
 // Line and column of a match, by counting newlines from the start each time.
@@ -90,6 +152,22 @@ Match position(std::string_view text, Span span) {
     return match;
 }
 
+// A match as a line number and a range inside that line's text.
+BruteLine lineOf(std::string_view text, Span span) {
+    const Match match = position(text, span);
+    const std::size_t lineStart = span.begin - (match.column - 1);
+    std::size_t lineEnd = lineStart;
+    while (lineEnd < text.size() && text[lineEnd] != '\n') {
+        ++lineEnd;
+    }
+    if (lineEnd > lineStart && text[lineEnd - 1] == '\r') {
+        --lineEnd;
+    }
+    const std::size_t begin = std::min(span.begin, lineEnd) - lineStart;
+    const std::size_t end = std::min(span.end, lineEnd) - lineStart;
+    return BruteLine{.number = match.line, .matches = {Span{begin, end}}};
+}
+
 }  // namespace
 
 SearchResults bruteForceSearch(const std::vector<TestFile>& files, const QueryNode& query,
@@ -97,22 +175,51 @@ SearchResults bruteForceSearch(const std::vector<TestFile>& files, const QueryNo
     SearchResults results;
     for (std::size_t id = 0; id < files.size(); ++id) {
         const TestFile& file = files[id];
-        if (!fileMatches(file.content, query, options.caseSensitive)) {
+        const FileView view{
+            .repo = "",
+            .path = file.path,
+            .content = file.content,
+            .caseSensitive = options.caseSensitive,
+        };
+        if (!fileMatches(view, query)) {
             continue;
         }
-
-        std::vector<Span> spans;
-        allSpans(file.content, query, options.caseSensitive, spans);
-        std::sort(spans.begin(), spans.end());
-        spans.erase(std::unique(spans.begin(), spans.end()), spans.end());
-
         FileMatch match;
         match.doc = static_cast<DocId>(id);
         match.path = file.path;
-        for (const Span span : spans) {
+        for (const Span span : sortedSpans(view, query)) {
             match.matches.push_back(position(file.content, span));
         }
         results.files.push_back(match);
+    }
+    return results;
+}
+
+std::vector<BruteFile> bruteForceRepoSearch(const std::vector<TestRepo>& repos,
+                                            const QueryNode& query, const SearchOptions& options) {
+    std::vector<BruteFile> results;
+    for (const TestRepo& repo : repos) {
+        for (const TestFile& file : repo.files) {
+            const FileView view{
+                .repo = repo.name,
+                .path = file.path,
+                .content = file.content,
+                .caseSensitive = options.caseSensitive,
+            };
+            if (!fileMatches(view, query)) {
+                continue;
+            }
+            BruteFile found{.repo = repo.name, .path = file.path, .lines = {}};
+            for (const Span span : sortedSpans(view, query)) {
+                BruteLine line = lineOf(file.content, span);
+                if (!found.lines.empty() && found.lines.back().number == line.number) {
+                    found.lines.back().matches.push_back(line.matches[0]);
+                } else {
+                    found.lines.push_back(std::move(line));
+                }
+            }
+            results.push_back(std::move(found));
+        }
     }
     return results;
 }

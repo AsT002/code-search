@@ -40,7 +40,7 @@ public:
     // everything else.
     std::optional<ObjectId> resolveHead() const;
 
-    // Every file in the commit, in every folder, sorted by path.
+    // Every file in the commit, in every folder, sorted by the path's bytes.
     std::vector<TreeEntry> listFiles(const ObjectId& commit) const;
 
 private:

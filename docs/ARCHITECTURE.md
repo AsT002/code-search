@@ -66,8 +66,8 @@ test and benchmark the core without Git.
 | `git/`    | Run Git without a shell. Clone, fetch, look up a commit ID, list files, read file contents by ID | `GitRunner`, `GitRepo`, `BlobStream` |
 | `repo/`   | Workspace folders, registry, publishing new index files, cleanup, locking | `Workspace`, `Registry`, `RegistryStore`, publishing steps (`writeToTmp`, `moveIntoIndexes`, `cleanUp`) |
 | `index/`  | Decide which files to index, extract trigrams, write and read index files | `FileFilter`, `IndexBuilder`, `ShardWriter`, `ShardReader`, `PostingCursor` |
-| `query/`  | Parse a query into a tree and plan how to run it | `Parser`, `QueryNode`, `Planner`, `RepoSelection`, `TrigramQuery` |
-| `search/` | Find candidate files, check them, collect matches, sort and limit results | `Matcher`, `Evaluator`, `Searcher` |
+| `query/`  | Parse a query into a tree and plan how to run it | `parseQuery`, `QueryNode`, `resolveRepo`, `planCandidates`, `TrigramQuery` |
+| `search/` | Find candidate files, check them, collect matches, limit and format results | `LiteralMatcher`, `Evaluator`, `searchRepos`, `JsonResultWriter` |
 | `util/`   | Small shared helpers, and `ObjectId`, which both `git/` and `index/` use | `Process`, `MmapFile`, `ObjectId`, `AtomicFile`, `ThreadPool`, `FileLock` |
 | `app/`    | Tie the modules together | `RepoManager`, `openRepos`, later `SearchService` |
 
@@ -117,24 +117,14 @@ public:
 };
 
 // query/
-struct AllRepos {};
-struct SelectedRepos { std::vector<RepoId> ids; };
-struct NoRepos {};
-using RepoSelection = std::variant<AllRepos, SelectedRepos, NoRepos>;
+ParsedQuery parseQuery(std::string_view text);  // throws QueryError
+// The query for one repo: repo:X becomes true or false, then it's simplified.
+// False means nothing in that repo can match, so the repo is skipped.
+QueryNode resolveRepo(const QueryNode& query, std::string_view repoName);
+TrigramQuery planCandidates(const QueryNode& query);  // finds at least every match
 
 using TrigramQuery =
-    std::variant<TrigramTerm, AndQuery, OrQuery, AllQuery, NoneQuery>;
-
-struct QueryPlan {
-    RepoSelection repos;
-    QueryNode expression;      // the whole query, kept as a tree
-    SearchOptions options;     // case, limits, context lines
-};
-
-struct ShardPlan {             // one per repo
-    QueryNode expression;      // with repo:X filters already resolved
-    TrigramQuery candidates;   // finds at least every matching file
-};
+    std::variant<AllQuery, NoneQuery, TrigramTerm, AndQuery, OrQuery>;
 
 // search/
 // M1 has LiteralMatcher only. A shared Matcher base class arrives with
@@ -146,19 +136,18 @@ public:
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 };
 
-// Built once per search from the whole query, then used on each candidate file.
+// Built once per repo from its resolved query, then used on each candidate file.
 class Evaluator {
 public:
     Evaluator(const QueryNode& query, const SearchOptions& options);
-    bool matches(std::string_view content) const;
-    std::vector<Span> collectSpans(std::string_view content) const;
+    bool matches(std::string_view path, std::string_view content) const;
+    std::vector<Span> collectSpans(std::string_view path, std::string_view content) const;
 };
 
-class Searcher {
-public:
-    SearchResults run(const QueryPlan& plan,
-                      std::span<const ShardReader* const> shards) const;
-};
+// Searches repo after repo and hands each matching file to onFile as soon as
+// it's found, so a limit keeps memory small.
+SearchStatus searchRepos(std::span<const SearchTarget> targets, const SearchRequest& request,
+                         const std::function<void(const ResultFile&)>& onFile);
 ```
 
 ## Reading files from Git
@@ -452,26 +441,66 @@ branch. A force-push is fine, because every build looks up a fresh commit.
 
 ## What a query means
 
-These are the starting choices. We'll lock them in before M6, when the JSON
-output becomes stable.
+Locked in with M6. The JSON output depends on these, so changing one later
+is a breaking change.
 
 | Question | Answer |
 |----------|--------|
 | `foo bar` | Both words anywhere in the same file |
+| `foo or bar` (or `OR`) | Either one. `or` binds looser than the space: `a b or c` is `(a b) or c` |
+| `-foo` | Files without `foo`. A `-` on its own, or before another `-` (`--verbose`), is text |
+| `( )` | Groups. Inside a word, parentheses are text when they balance: `printf(` and `f(x)` |
+| Quotes and backslashes | `"foo bar"` keeps spaces, `or`, `-` and `:` as text, with `\"` and `\\` inside. Outside quotes, `\` makes the next character text. Pieces join like in a shell: `pre"fix"` |
 | Queries with no search text, like `lang:go` or `-foo` | Return matching files, with nothing highlighted |
-| What `--max-results` counts | Matching lines |
-| Result order | Repo, then path, then position in the file. Same every run |
-| Case | Case-insensitive by default. `case:yes` makes it case-sensitive. Only ASCII letters are folded, without using the system locale (no `tolower`) |
+| What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
+| `path:` and `file:` | Substring of the file's path, with the query's case rule. `file:` will also take a regex (M8) |
+| `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
+| `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
+| Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
 | Case-insensitive non-ASCII | Not supported in v1 |
-| Positions | Byte offsets inside the engine. Line and column are worked out for display |
-| Line endings | A line ends at LF. A CR before it stays in the content and is hidden on display |
-| `path:` and `file:` | Substring match on the path. `file:` also takes a regex |
-| `repo:` | Exact repo name |
-| Incomplete results | Results say if they're complete, cut off by a limit, or cancelled |
+| What `--max-results` counts | Matching lines. A file counts as one when there's nothing to highlight, or with `-l`. A file can be cut partway |
+| Result order | Repo name, then path (by its bytes), then position in the file. Same every run |
+| Positions | Byte offsets inside the engine. Line and column (in bytes, from 1) are worked out for display |
+| Line endings | A line ends at LF. A CR before it stays in the content and is hidden on display. A match that runs past the end of its line is cut there |
+| Incomplete results | Results say if they're complete, cut off by a limit, or cancelled (Ctrl-C) |
+| Errors | Empty queries, unbalanced parentheses or quotes, a filter with no value, and nesting deeper than 100 levels are errors, with a message saying what's wrong |
 
 Checking a file has two steps. `matches` decides yes or no using the
 whole query. `collectSpans` then finds what to highlight, only for files that
 matched. For `foo -bar`, a file isn't shown until we've checked it has no `bar`.
+
+### Output
+
+Text output looks like grep's:
+
+```
+repo:path:line:column:text     a line with a match (column of its first match)
+repo:path-line-text            a context line, with -C n
+--                             between groups that aren't next to each other, with -C
+repo:path                      with -l, or when there's nothing to highlight
+```
+
+With `--path` there's no `repo:` in front. Colors follow grep: on for a
+terminal, off for a pipe, `NO_COLOR` or `TERM=dumb`; `--color=always` or
+`--color=never` decides.
+
+`--json` prints one document. Files are written as they're found, so a big
+result never has to sit in memory:
+
+```json
+{"files":[
+{"repo":"demo","path":"a.go","lines":[
+  {"line":1,"text":"one","matches":[]},
+  {"line":2,"text":"two needle","matches":[{"start":4,"end":10}]}]}
+],"status":"complete"}
+```
+
+- `status` is `complete`, `truncated` (a limit cut it) or `cancelled`.
+- `lines` holds matching lines and context lines; context lines have no
+  matches. It's empty with `-l` and for files with nothing to highlight.
+- `start` and `end` are byte offsets inside the line's original bytes.
+- JSON text must be valid UTF-8. If a path or line isn't, its bad bytes become
+  U+FFFD, and `path_base64` or `text_base64` holds the exact bytes.
 
 ## How a search runs
 
@@ -521,13 +550,19 @@ handle `(repo:A foo) or (repo:B bar)`. Split up, it becomes
 | Text of 3+ bytes | `And` of its trigrams (lowercased) |
 | Text shorter than 3 bytes | `All` |
 | `A and B` | `And[A, B]` |
-| `A or B` | `Or[A, B]`. If either side is `All`, the result is `All` |
+| `A or B` | `Or[A, B]`, which merges the posting lists. If either side is `All`, the result is `All` |
 | `not A` | `All` in v1. A missing trigram does prove `A` is absent; we can use that later |
 | Filters like `lang:` or `path:` | `All` here. The final check applies them |
 | Regex | `All` in v1. See below |
 
 Never take the opposite of a candidate list. Its extra files would turn into
 missed matches.
+
+Before planning, each repo gets its own copy of the query with `repo:` turned
+into true or false and simplified (`resolveRepo`). In an `and`, false makes
+it all false. In an `or`, true makes it match every file, but it stays next
+to the other branches instead of replacing the `or`, because they still say
+what to highlight.
 
 How each part runs:
 
@@ -610,7 +645,7 @@ or tree-sitter. It would be one more kind of query part.
 | `withContent` callback | Works the same for mapped and decompressed content |
 | Posting cursors | No copying a list into a vector for every query term |
 | Keep the whole query for the final check | Splitting it gives wrong results for OR across filters |
-| `RepoSelection` type | A filter that matches no repo must not turn into "all repos" |
+| Resolve `repo:` per repo | A repo whose query becomes false is skipped, so a filter that matches no repo can never turn into "all repos" |
 | ASCII-only case folding | Doesn't depend on the system locale, and matches how trigrams are built |
 | RE2, full scan first | A correct baseline before any shortcuts |
 | JSON registry behind `RegistryStore` | Little data, one writer at a time. SQLite if we ever need it |
@@ -653,8 +688,9 @@ code-search/
 │   ├── index/      trigram.hpp  file_filter.hpp  index_builder.hpp
 │   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp
 │               posting_cursor.hpp  index_file_error.hpp
-│   ├── query/      ast.hpp  parser.hpp  planner.hpp  trigram_query.hpp
-│   ├── search/     matcher.hpp  evaluator.hpp  searcher.hpp  result.hpp
+│   ├── query/      ast.hpp  parser.hpp  language.hpp  planner.hpp  trigram_query.hpp
+│   ├── search/     literal_matcher.hpp  candidates.hpp  evaluator.hpp  searcher.hpp
+│   │               repo_search.hpp  json_output.hpp
 │   ├── app/        index_commit.hpp  repo_manager.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
 │                   object_id.hpp
@@ -683,7 +719,10 @@ code-search search "authenticate"
 code-search search "authenticate" --repo my-backend
 code-search search --path ~/projects/other "authenticate"   # not added; indexed in memory
 code-search search 'auth lang:go -path:_test'
-code-search search '/auth(enticate|orize)/'
+code-search search '(repo:backend login) or (repo:frontend signIn)'
+code-search search -C 2 --max-results 20 'TODO'
+code-search search --json 'authenticate'
+code-search search '/auth(enticate|orize)/'      # regex, in M8
 code-search update my-backend
 code-search update my-backend --rebuild
 code-search remove my-backend                    # never deletes your code

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <functional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,9 +33,27 @@ struct SearchResults {
     friend bool operator==(const SearchResults&, const SearchResults&) = default;
 };
 
+// How a search ended.
+enum class SearchStatus {
+    Complete,   // every match was found
+    Truncated,  // stopped early, by a limit
+    Cancelled,  // stopped early, because the user asked
+};
+
 // Adds line and column to each span. Lines end at '\n'. `spans` must be sorted.
 std::vector<Match> locate(std::string_view content, std::span<const Span> spans);
 
+// Calls onFile for each file matching `query`, in doc ID order, with the
+// file's content. The content is only valid during the call. onFile returns
+// false to stop, which makes this return Truncated. If `cancelled` is set,
+// it's checked before each file, and once it's true this returns Cancelled.
+// The query's repo: filters must already be resolved (resolveRepo).
+SearchStatus forEachMatch(
+    const IndexReader& index, const QueryNode& query, const SearchOptions& options,
+    const std::function<bool(const FileMatch& file, std::string_view content)>& onFile,
+    const std::atomic<bool>* cancelled = nullptr);
+
+// Every file matching `query`. For tests and small searches.
 SearchResults search(const IndexReader& index, const QueryNode& query,
                      const SearchOptions& options = {});
 

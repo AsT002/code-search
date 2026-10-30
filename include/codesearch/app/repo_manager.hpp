@@ -9,6 +9,7 @@
 
 #include "codesearch/app/index_commit.hpp"
 #include "codesearch/index/shard_reader.hpp"
+#include "codesearch/query/ast.hpp"
 #include "codesearch/repo/registry.hpp"
 #include "codesearch/repo/workspace.hpp"
 
@@ -91,12 +92,13 @@ struct OpenRepo {
     std::unique_ptr<ShardReader> index;  // a pointer, because ShardReader can't be moved
 };
 
-// Opens the current index of every repo, sorted by name, or only of the repo
-// called `onlyName` if it isn't empty. Doesn't take the lock, so it works
-// while a change runs. If an index file was deleted between reading the
-// registry and opening the file, the registry changed: read it again and
-// retry once. Throws std::runtime_error if `onlyName` isn't a repo, and
+// Opens the current index of each repo `query` could match in, sorted by
+// name: every repo except those where resolveRepo makes the query false. So
+// "repo:a foo" opens only a. Doesn't take the lock, so it works while a
+// change runs. If an index file was deleted between reading the registry and
+// opening the file, the registry changed: read it again and retry once.
+// Throws std::runtime_error if the query names a repo that isn't added, and
 // IndexFileError (naming the repo) if an index is damaged.
-std::vector<OpenRepo> openRepos(const Workspace& workspace, const std::string& onlyName);
+std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query);
 
 }  // namespace codesearch

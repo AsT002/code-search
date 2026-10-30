@@ -37,6 +37,8 @@ add_library(codesearch_core
   src/index/shard_reader.cpp
   src/index/shard_writer.cpp
   src/index/trigram.cpp
+  src/query/language.cpp
+  src/query/parser.cpp
   src/query/planner.cpp
   src/repo/github_url.cpp
   src/repo/publisher.cpp
@@ -44,7 +46,9 @@ add_library(codesearch_core
   src/repo/workspace.cpp
   src/search/candidates.cpp
   src/search/evaluator.cpp
+  src/search/json_output.cpp
   src/search/literal_matcher.cpp
+  src/search/repo_search.cpp
   src/search/searcher.cpp
   src/util/atomic_file.cpp
   src/util/file_lock.cpp

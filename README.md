@@ -43,15 +43,42 @@ All presets treat compiler warnings as errors.
 ./build/debug/code-search search --repo my-backend "authenticate"
 ./build/debug/code-search search -l "TODO"                     # file names only
 ./build/debug/code-search search --case-sensitive "Foo"
-./build/debug/code-search search -- "--verbose"                # text starting with -
+./build/debug/code-search search -- '-test foo'                # a query starting with -
 ./build/debug/code-search update my-backend                    # pick up new commits
 ./build/debug/code-search update my-backend --rebuild          # build again anyway
 ./build/debug/code-search verify my-backend                    # full check of the index
 ./build/debug/code-search remove my-backend                    # never deletes your code
 ```
 
+Put the query in quotes, so the shell passes it as one argument:
+
+```sh
+./build/debug/code-search search 'auth lang:go -path:_test'    # all three
+./build/debug/code-search search 'login or signin'
+./build/debug/code-search search '(repo:backend login) or (repo:frontend signIn)'
+./build/debug/code-search search '"or" "two words"'            # quotes make it text
+./build/debug/code-search search 'case:yes Foo'
+./build/debug/code-search search -C 2 --max-results 20 TODO    # context, limit
+./build/debug/code-search search --json authenticate
+```
+
+| Query | Meaning |
+|-------|---------|
+| `foo bar` | both, anywhere in the same file |
+| `foo or bar` | either one |
+| `-foo` | files without foo |
+| `(a or b) c` | parentheses group |
+| `"foo bar"`, `\-x` | text as it is |
+| `repo:name` | only this repo |
+| `path:text`, `file:text` | the path contains the text |
+| `lang:go` | the language, from the file name |
+| `case:yes`, `case:no` | match case or not |
+
+The full rules are in [What a query means](docs/ARCHITECTURE.md#what-a-query-means).
+
 Results look like `my-backend:src/auth.ts:12:14:export function authenticate`.
-Exit codes work like grep: 0 found something, 1 found nothing, 2 error.
+Exit codes work like grep: 0 found something, 1 found nothing, 2 error. A
+search stopped with Ctrl-C prints what it found so far and exits with 130.
 `verify` exits with 0 if the index is fine, 1 if it is damaged, and 2 if it
 can't be read at all.
 
