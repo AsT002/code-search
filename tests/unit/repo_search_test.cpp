@@ -57,6 +57,11 @@ TEST(ResultLines, LimitCountsMatchingLines) {
     EXPECT_EQ(lines[4], around(5, "five xx xx"));
 }
 
+TEST(ResultLines, OnlyACrBeforeANewlineIsHidden) {
+    EXPECT_EQ(linesFor("xyz\r", "xyz", 0), (std::vector<ResultLine>{hit(1, "xyz\r", {{0, 3}})}));
+    EXPECT_EQ(linesFor("a\rb\r\n", "b", 0), (std::vector<ResultLine>{hit(1, "a\rb", {{2, 3}})}));
+}
+
 TEST(ResultLines, MatchesAreCutAtTheEndOfTheLine) {
     // The match runs into the next line and over the CR, which isn't shown.
     EXPECT_EQ(linesFor("ab\r\ncd", "b\r\nc", 0), (std::vector<ResultLine>{hit(1, "ab", {{1, 2}})}));

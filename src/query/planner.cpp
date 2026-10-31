@@ -1,6 +1,7 @@
 #include "codesearch/query/planner.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <utility>
 
 #include "codesearch/index/trigram.hpp"
@@ -15,6 +16,25 @@ std::optional<bool> constValue(const QueryNode& node) {
         return known->value;
     }
     return std::nullopt;
+}
+
+// True if `node` is the constant `value`.
+bool isConst(const QueryNode& node, bool value) {
+    const auto* known = std::get_if<ConstNode>(&node.value);
+    return known != nullptr && known->value == value;
+}
+
+// True if a simplified `node` matches every file. Besides true itself, an
+// or with a true child does: simplify keeps that true next to the other
+// children, so they can still be highlighted. So does an and of such parts.
+bool alwaysTrue(const QueryNode& node) {
+    if (const auto* orNode = std::get_if<OrNode>(&node.value)) {
+        return std::any_of(orNode->children.begin(), orNode->children.end(), alwaysTrue);
+    }
+    if (const auto* andNode = std::get_if<AndNode>(&node.value)) {
+        return std::all_of(andNode->children.begin(), andNode->children.end(), alwaysTrue);
+    }
+    return isConst(node, true);
 }
 
 // The children of `node` if it's an and (isAnd) or an or (!isAnd), or null.
@@ -211,9 +231,13 @@ QueryNode simplify(const QueryNode& query) {
     }
     if (const auto* node = std::get_if<NotNode>(&query.value)) {
         QueryNode child = simplify(node->child[0]);
-        const std::optional<bool> known = constValue(child);
-        if (known.has_value()) {
-            return constant(!known.value());
+        // Nothing under a '-' is highlighted, so a child that matches every
+        // file can turn into plain false here.
+        if (alwaysTrue(child)) {
+            return constant(false);
+        }
+        if (isConst(child, false)) {
+            return constant(true);
         }
         return negate(std::move(child));
     }

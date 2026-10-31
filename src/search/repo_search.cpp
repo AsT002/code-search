@@ -27,11 +27,13 @@ std::string_view lineText(std::string_view content, const std::vector<std::size_
                           std::size_t number) {
     const std::size_t start = starts[number - 1];
     std::size_t end = number < starts.size() ? starts[number] : content.size();
+    // Only a CR right before the '\n' is part of the line ending. A CR at
+    // the very end of the file, with no '\n' after it, is text.
     if (end > start && content[end - 1] == '\n') {
         --end;
-    }
-    if (end > start && content[end - 1] == '\r') {
-        --end;
+        if (end > start && content[end - 1] == '\r') {
+            --end;
+        }
     }
     return content.substr(start, end - start);
 }

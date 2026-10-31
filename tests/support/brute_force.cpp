@@ -160,7 +160,8 @@ BruteLine lineOf(std::string_view text, Span span) {
     while (lineEnd < text.size() && text[lineEnd] != '\n') {
         ++lineEnd;
     }
-    if (lineEnd > lineStart && text[lineEnd - 1] == '\r') {
+    const bool endsWithNewline = lineEnd < text.size();
+    if (endsWithNewline && lineEnd > lineStart && text[lineEnd - 1] == '\r') {
         --lineEnd;
     }
     const std::size_t begin = std::min(span.begin, lineEnd) - lineStart;

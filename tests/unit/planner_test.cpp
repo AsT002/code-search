@@ -87,6 +87,17 @@ TEST(ResolveRepo, KeepsTheWholeQueryPerRepo) {
     EXPECT_EQ(resolveRepo(allOf({negate(repoFilter("A")), literal("x")}), "A"), constant(false));
     EXPECT_EQ(resolveRepo(allOf({negate(repoFilter("A")), literal("x")}), "B"), literal("x"));
     EXPECT_EQ(resolveRepo(literal("x"), "A"), literal("x"));
+
+    // An or that's true for this repo stays (for highlights), but under a
+    // '-' it must become false, so the repo is skipped.
+    const QueryNode excluded = negate(anyOf({repoFilter("A"), literal("x")}));
+    EXPECT_EQ(resolveRepo(excluded, "A"), constant(false));
+    EXPECT_EQ(resolveRepo(excluded, "B"), negate(literal("x")));
+    const QueryNode both = negate(
+        allOf({anyOf({repoFilter("A"), literal("x")}), anyOf({repoFilter("A"), literal("y")})}));
+    EXPECT_EQ(resolveRepo(both, "A"), constant(false));
+    EXPECT_EQ(resolveRepo(negate(negate(anyOf({repoFilter("A"), literal("x")}))), "A"),
+              constant(true));
 }
 
 TEST(RepoNamesIn, SortedOnce) {

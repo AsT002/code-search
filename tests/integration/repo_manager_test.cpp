@@ -637,7 +637,10 @@ TEST(RepoManager, OpenReposOpensOnlyWhatTheQueryNeeds) {
         openRepos(workspace, allOf({repoFilter("other"), literal("needle")}));
     ASSERT_EQ(opened.size(), 1U);
     EXPECT_EQ(opened[0].name, "other");
-    EXPECT_EQ(openRepos(workspace, negate(anyOf({repoFilter("backend")}))).size(), 1U);
+    EXPECT_EQ(openRepos(workspace, negate(repoFilter("backend"))).size(), 1U);
+    EXPECT_EQ(
+        openRepos(workspace, negate(anyOf({repoFilter("backend"), literal("missing")}))).size(),
+        1U);
     expectError(
         [&] {
             openRepos(workspace, literal("needle"));

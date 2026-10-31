@@ -296,6 +296,12 @@ TEST(CliQuery, Color) {
     EXPECT_EQ(searchIn(repo, {"--color=always", "three"}).out,
               "\033[35ma.go\033[0m\033[36m:\033[0m\033[32m3\033[0m\033[36m:\033[0m"
               "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mthree\033[0m\n");
+    // Overlapping matches: the second one's tail is colored too.
+    repo.write("d.txt", "abcde\n");
+    repo.commit();
+    EXPECT_EQ(searchIn(repo, {"--color=always", "abc bcde"}).out,
+              "\033[35md.txt\033[0m\033[36m:\033[0m\033[32m1\033[0m\033[36m:\033[0m"
+              "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mabc\033[0m\033[1;31mde\033[0m\n");
     // Output to a pipe isn't a terminal, so auto means no color.
     EXPECT_EQ(searchIn(repo, {"three"}).out, "a.go:3:1:three\n");
     EXPECT_EQ(searchIn(repo, {"--color=never", "three"}).out, "a.go:3:1:three\n");

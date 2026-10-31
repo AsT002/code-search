@@ -256,12 +256,14 @@ Colors pickColors(Color color) {
 void printHighlighted(const ResultLine& line, const Colors& colors) {
     std::size_t done = 0;
     for (const Span& span : line.matches) {
-        if (span.begin < done) {
-            continue;  // overlaps one we printed already
+        // Matches can overlap ("ab or bc" in "abc"). Color only the part of
+        // this one that isn't colored yet.
+        const std::size_t begin = std::max(span.begin, done);
+        if (span.end <= begin) {
+            continue;
         }
-        std::cout << std::string_view(line.text).substr(done, span.begin - done) << colors.match
-                  << std::string_view(line.text).substr(span.begin, span.end - span.begin)
-                  << colors.reset;
+        std::cout << std::string_view(line.text).substr(done, begin - done) << colors.match
+                  << std::string_view(line.text).substr(begin, span.end - begin) << colors.reset;
         done = span.end;
     }
     std::cout << std::string_view(line.text).substr(done);
