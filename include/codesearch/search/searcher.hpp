@@ -40,7 +40,10 @@ enum class SearchStatus {
     Cancelled,  // stopped early, because the user asked
 };
 
-// Adds line and column to each span. Lines end at '\n'. `spans` must be sorted.
+// Adds line and column to each span. Lines end at '\n'. `spans` must be
+// sorted. A span that starts in a line ending (a '\n', or a '\r' before
+// one) starts at its first byte after it instead, on that line, so what's
+// shown starts there. One that's only line endings stays as it is.
 std::vector<Match> locate(std::string_view content, std::span<const Span> spans);
 
 // Calls onFile for each file matching `query`, in doc ID order, with the

@@ -234,6 +234,11 @@ The marker is the first thing written, and it's written in place rather than
 through a temp file, so a first `add` killed at any point leaves a folder that
 the next one accepts.
 
+`add`, `update` and `remove` write an empty `registry.json` before they
+build anything. If it's missing later while `indexes/` or `repos/` have
+files in them, they refuse to run instead of cleaning up, since cleanup
+would delete every index file and clone the registry doesn't list.
+
 - Files and folders are named by internal IDs like `r_7f3a90b1` (8 random hex
   digits). The name a user gives
   with `--name` is only a label in the registry and never becomes a path.
@@ -474,10 +479,10 @@ is a breaking change.
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
 | Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
 | Case-insensitive non-ASCII | Not supported in v1 |
-| What `--max-results` counts | Matching lines. A file counts as one when there's nothing to highlight, or with `-l`. A file can be cut partway |
+| What `--max-results` counts | Matching lines. A file counts as one when there's nothing to highlight, or with `-l`. A file can be cut partway. 0, the default, means no limit |
 | Result order | Repo name, then path (by its bytes), then position in the file. Same every run |
 | Positions | Byte offsets inside the engine. Line and column (in bytes, from 1) are worked out for display |
-| Line endings | A line ends at LF. A CR before it stays in the content and is hidden on display. A match that runs past the end of its line is cut there |
+| Line endings | A line ends at LF. A CR before it stays in the content and is hidden on display. A match that runs past the end of its line is cut there. One that starts in a line ending, like `"\nfoo"`, is shown from its first visible byte, on the next line; one made only of line endings is an empty highlight at the end of its line |
 | Incomplete results | Results say if they're complete, cut off by a limit, or cancelled (Ctrl-C) |
 | Errors | Empty queries, unbalanced parentheses or quotes, a filter with no value, and nesting deeper than 100 levels are errors, with a message saying what's wrong |
 
@@ -500,6 +505,15 @@ With `--path` there's no `repo:` in front. Colors follow grep: on for a
 terminal, off for a pipe, `NO_COLOR` or `TERM=dumb`; `--color=always` or
 `--color=never` decides.
 
+On a terminal, or with colors, bytes that could control the terminal are
+shown as `\xHH`: control bytes other than tab, DEL, the C1 controls U+0080 to
+U+009F, and bytes that aren't valid UTF-8. So a file can't change the title
+or clear the screen through an escape sequence. Into a pipe or a file
+without colors, the bytes are written as they are.
+
+If the output closes early, like `| head`, the search stops at the next
+file and exits with 2.
+
 `--json` prints one document. Files are written as they're found, so a big
 result never has to sit in memory:
 
@@ -511,7 +525,10 @@ result never has to sit in memory:
 ],"status":"complete"}
 ```
 
-- `status` is `complete`, `truncated` (a limit cut it) or `cancelled`.
+- `status` is `complete`, `truncated` (a limit cut it), `cancelled`, or
+  `error`. With `error`, an `error` field holds the message, like a damaged
+  index, and the files before it are still there. The program also prints
+  the message to stderr and exits with 2. (`error` was added after M6.)
 - `lines` holds matching lines and context lines; context lines have no
   matches. It's empty with `-l` and for files with nothing to highlight.
 - `start` and `end` are byte offsets inside the line's original bytes.

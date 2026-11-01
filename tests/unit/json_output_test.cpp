@@ -77,5 +77,16 @@ TEST(JsonOutput, WholeDocument) {
     EXPECT_EQ(statusName(SearchStatus::Cancelled), "cancelled");
 }
 
+TEST(JsonResultWriter, AnErrorStillEndsTheDocument) {
+    std::ostringstream out;
+    JsonResultWriter writer(out);
+    writer.file(ResultFile{.repo = "r", .path = "a.txt", .lines = {}});
+    writer.fail("r: index file is damaged: \"x\" \xff");
+    EXPECT_EQ(
+        out.str(),
+        "{\"files\":[\n{\"repo\":\"r\",\"path\":\"a.txt\",\"lines\":[]}\n"
+        "],\"status\":\"error\",\"error\":\"r: index file is damaged: \\\"x\\\" \xef\xbf\xbd\"}\n");
+}
+
 }  // namespace
 }  // namespace codesearch

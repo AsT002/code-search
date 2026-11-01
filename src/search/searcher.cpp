@@ -8,8 +8,20 @@
 
 namespace codesearch {
 
+namespace {
+
+// True if content[at] is part of a line ending: a '\n', or a '\r' right
+// before one. Those bytes aren't shown.
+bool inLineEnding(std::string_view content, std::size_t at) {
+    return content[at] == '\n' ||
+           (content[at] == '\r' && at + 1 < content.size() && content[at + 1] == '\n');
+}
+
+}  // namespace
+
 std::vector<Match> locate(std::string_view content, std::span<const Span> spans) {
     std::vector<Match> matches;
+    bool moved = false;  // a match was moved past a line ending
 
     // Walk the content once, keeping track of which line we're on.
     std::size_t line = 1;
@@ -30,7 +42,33 @@ std::vector<Match> locate(std::string_view content, std::span<const Span> spans)
         match.bytes = span;
         match.line = line;
         match.column = span.begin - lineStart + 1;
+
+        // A match that starts in a line ending, like "\nfoo", is shown from
+        // its first visible byte, on the next line. One that's all line
+        // endings has nothing to show, so it stays where it starts.
+        std::size_t visible = span.begin;
+        std::size_t visibleLine = line;
+        std::size_t visibleLineStart = lineStart;
+        while (visible < span.end && inLineEnding(content, visible)) {
+            if (content[visible] == '\n') {
+                ++visibleLine;
+                visibleLineStart = visible + 1;
+            }
+            ++visible;
+        }
+        if (visible > span.begin && visible < span.end) {
+            match.bytes.begin = visible;
+            match.line = visibleLine;
+            match.column = visible - visibleLineStart + 1;
+            moved = true;
+        }
         matches.push_back(match);
+    }
+    // A moved match can now start after one that came after it.
+    if (moved) {
+        std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+            return a.bytes.begin < b.bytes.begin;
+        });
     }
     return matches;
 }

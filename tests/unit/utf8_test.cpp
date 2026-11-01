@@ -48,5 +48,24 @@ TEST(ReplaceInvalidUtf8, ReplacesEachBadByte) {
     EXPECT_TRUE(isValidUtf8(replaceInvalidUtf8("\xC0\x80\xED\xA0\x80\xF5")));
 }
 
+TEST(Utf8, EscapeForTerminal) {
+    EXPECT_EQ(escapeForTerminal("plain text\twith tab"), "plain text\twith tab");
+    EXPECT_EQ(escapeForTerminal("\x1b[31mred\x07"), "\\x1b[31mred\\x07");
+    EXPECT_EQ(escapeForTerminal(std::string("a\0b\x7f", 4)), "a\\x00b\\x7f");
+    EXPECT_EQ(escapeForTerminal("\r\n"), "\\x0d\\x0a");
+    // C1 controls as UTF-8, and a lone byte that some terminals read as CSI.
+    // ("\x9b" "2J": a hex escape would also take the 2.)
+    EXPECT_EQ(escapeForTerminal("x\xc2\x9b"
+                                "2Jy"),
+              "x\\xc2\\x9b2Jy");
+    EXPECT_EQ(escapeForTerminal("x\x9b"
+                                "2J"),
+              "x\\x9b2J");
+    // Other characters stay, even ones with 0x80 to 0x9F inside them.
+    EXPECT_EQ(escapeForTerminal("caf\xc3\xa9 \xe2\x80\xba \xc2\xa0"),
+              "caf\xc3\xa9 \xe2\x80\xba \xc2\xa0");
+    EXPECT_EQ(escapeForTerminal("\xff"), "\\xff");
+}
+
 }  // namespace
 }  // namespace codesearch

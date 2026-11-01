@@ -13,6 +13,7 @@
 #include "codesearch/query/planner.hpp"
 #include "codesearch/repo/github_url.hpp"
 #include "codesearch/repo/publisher.hpp"
+#include "codesearch/util/ascii.hpp"
 #include "codesearch/util/file_lock.hpp"
 #include "codesearch/util/utf8.hpp"
 
@@ -73,6 +74,46 @@ Source resolveSource(const std::string& text, const Workspace& workspace) {
         .location = path.string(),
         .defaultName = path.filename().string(),
     };
+}
+
+// True if the folder exists and has anything in it.
+bool hasEntries(const std::filesystem::path& folder) {
+    return std::filesystem::exists(folder) &&
+           std::filesystem::directory_iterator(folder) != std::filesystem::directory_iterator();
+}
+
+// The registry, for a change that holds the lock. Cleanup deletes every
+// index file and clone the registry doesn't list, so a registry.json that's
+// gone missing would delete them all. If it's missing while there are index
+// files or clones, refuse. If it's missing with nothing there, write an
+// empty one first: then a change killed before its first save still leaves
+// a registry, and the next cleanup removes what it left.
+Registry loadForChange(const Workspace& workspace, RegistryStore& store) {
+    if (!std::filesystem::exists(workspace.registryFile())) {
+        if (hasEntries(workspace.indexesDir()) || hasEntries(workspace.reposDir())) {
+            throw std::runtime_error(
+                workspace.registryFile().string() +
+                " is missing, but there are index files or clones in " + workspace.root().string() +
+                ". Put registry.json back, or remove the folder to start over");
+        }
+        store.save(Registry{});
+    }
+    return store.load();
+}
+
+// True if `repo` is the repo `source` names. GitHub owner and repo names
+// don't depend on case, so github.com/Owner/Repo is github.com/owner/repo.
+bool sameLocation(const RepoEntry& repo, const Source& source) {
+    if (repo.source != source.kind) {
+        return false;
+    }
+    if (source.kind == RepoSource::Local) {
+        return repo.location == source.location;
+    }
+    return std::equal(repo.location.begin(), repo.location.end(), source.location.begin(),
+                      source.location.end(), [](char a, char b) {
+                          return foldAscii(a) == foldAscii(b);
+                      });
 }
 
 std::string pickName(const std::string& requested, const Source& source, const Registry& registry) {
@@ -158,13 +199,13 @@ AddResult RepoManager::add(const std::string& source, const std::string& name) {
     const FileLock lock(workspace_.lockFile(), onWait_);
     step("locked");
     JsonRegistryStore store(workspace_.registryFile());
-    Registry registry = store.load();
+    Registry registry = loadForChange(workspace_, store);
     cleanUp(workspace_, registry);
 
     try {
         const Source resolved = resolveSource(source, workspace_);
         for (const RepoEntry& repo : registry.repos) {
-            if (repo.location == resolved.location) {
+            if (sameLocation(repo, resolved)) {
                 throw std::runtime_error(resolved.location + " is already added as " + repo.name);
             }
         }
@@ -209,7 +250,7 @@ UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
     const FileLock lock(workspace_.lockFile(), onWait_);
     step("locked");
     JsonRegistryStore store(workspace_.registryFile());
-    Registry registry = store.load();
+    Registry registry = loadForChange(workspace_, store);
     cleanUp(workspace_, registry);
 
     const RepoEntry* found = registry.find(name);
@@ -289,7 +330,7 @@ RepoEntry RepoManager::remove(const std::string& name) {
     const FileLock lock(workspace_.lockFile(), onWait_);
     step("locked");
     JsonRegistryStore store(workspace_.registryFile());
-    Registry registry = store.load();
+    Registry registry = loadForChange(workspace_, store);
     cleanUp(workspace_, registry);
 
     const RepoEntry* found = registry.find(name);

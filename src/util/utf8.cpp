@@ -1,5 +1,7 @@
 #include "codesearch/util/utf8.hpp"
 
+#include <algorithm>
+
 #include <cstddef>
 
 namespace codesearch {
@@ -74,6 +76,41 @@ bool isValidUtf8(std::string_view text) {
         i += length;
     }
     return true;
+}
+
+namespace {
+
+void appendHex(std::string& out, unsigned char byte) {
+    constexpr std::string_view kDigits = "0123456789abcdef";
+    out += "\\x";
+    out += kDigits[byte >> 4U];
+    out += kDigits[byte & 0xFU];
+}
+
+}  // namespace
+
+std::string escapeForTerminal(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const auto byte = static_cast<unsigned char>(text[i]);
+        const std::size_t length = validLength(text, i);
+        // C1 controls are U+0080 to U+009F: C2 80 to C2 9F in UTF-8.
+        const bool c1 =
+            length == 2 && byte == 0xC2 && static_cast<unsigned char>(text[i + 1]) <= 0x9F;
+        const bool control = length == 1 && ((byte < 0x20 && byte != '\t') || byte == 0x7F);
+        if (length == 0 || control || c1) {
+            for (std::size_t k = 0; k < std::max<std::size_t>(length, 1); ++k) {
+                appendHex(out, static_cast<unsigned char>(text[i + k]));
+            }
+            i += std::max<std::size_t>(length, 1);
+        } else {
+            out.append(text.substr(i, length));
+            i += length;
+        }
+    }
+    return out;
 }
 
 std::string replaceInvalidUtf8(std::string_view text) {

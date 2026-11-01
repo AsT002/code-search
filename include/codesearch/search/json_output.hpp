@@ -25,12 +25,20 @@ std::string resultFileJson(const ResultFile& file);
 // have to be held in memory:
 //
 //   {"files":[{...},{...}],"status":"complete"}
+//
+// If the search fails partway, fail() ends the document instead, so it's
+// still whole JSON:
+//
+//   {"files":[{...}],"status":"error","error":"demo: index file is damaged: ..."}
 class JsonResultWriter {
 public:
     explicit JsonResultWriter(std::ostream& out);
 
     void file(const ResultFile& file);
     void finish(SearchStatus status);
+    // Ends the document with "status":"error" and the message. Bytes of the
+    // message that aren't valid UTF-8 become U+FFFD.
+    void fail(std::string_view message);
 
 private:
     std::ostream* out_;  // a pointer, not a reference, so the class can be assigned

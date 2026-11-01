@@ -59,7 +59,7 @@ Put the query in quotes, so the shell passes it as one argument:
 ./build/debug/code-search search '(repo:backend login) or (repo:frontend signIn)'
 ./build/debug/code-search search '"or" "two words"'            # quotes make it text
 ./build/debug/code-search search 'case:yes Foo'
-./build/debug/code-search search -C 2 --max-results 20 TODO    # context, limit
+./build/debug/code-search search -C 2 --max-results 20 TODO    # context, limit (0: none)
 ./build/debug/code-search search --json authenticate
 ```
 

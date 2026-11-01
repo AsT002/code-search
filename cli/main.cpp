@@ -23,6 +23,7 @@
 #include "codesearch/query/planner.hpp"
 #include "codesearch/search/json_output.hpp"
 #include "codesearch/search/repo_search.hpp"
+#include "codesearch/util/utf8.hpp"
 #include "codesearch/version.hpp"
 
 namespace {
@@ -46,7 +47,8 @@ void printUsage(std::ostream& out) {
            "  --case-sensitive      match case (same as case:yes)\n"
            "  -l                    print only the paths of matching files\n"
            "  -C <n>                show n lines before and after each match\n"
-           "  --max-results <n>     stop after n matching lines (files with -l)\n"
+           "  --max-results <n>     stop after n matching lines (files with -l); 0, the\n"
+           "                        default, means no limit\n"
            "  --json                print the results as JSON\n"
            "  --color=<when>        auto (the default), always or never\n"
            "\n"
@@ -262,8 +264,15 @@ Colors pickColors(Color color) {
     };
 }
 
-// Prints a line's text with its matches colored.
-void printHighlighted(const ResultLine& line, const Colors& colors) {
+// `text` as it should be printed: escaped if `escape`, so a file's bytes
+// can't control the terminal (see escapeForTerminal).
+std::string shown(std::string_view text, bool escape) {
+    return escape ? escapeForTerminal(text) : std::string(text);
+}
+
+// Prints a line's text with its matches colored. Each piece is escaped on
+// its own, so the highlights stay where they were.
+void printHighlighted(const ResultLine& line, const Colors& colors, bool escape) {
     std::size_t done = 0;
     for (const Span& span : line.matches) {
         // Matches can overlap ("ab or bc" in "abc"). Color only the part of
@@ -272,11 +281,13 @@ void printHighlighted(const ResultLine& line, const Colors& colors) {
         if (span.end <= begin) {
             continue;
         }
-        std::cout << std::string_view(line.text).substr(done, begin - done) << colors.match
-                  << std::string_view(line.text).substr(begin, span.end - begin) << colors.reset;
+        std::cout << shown(std::string_view(line.text).substr(done, begin - done), escape)
+                  << colors.match
+                  << shown(std::string_view(line.text).substr(begin, span.end - begin), escape)
+                  << colors.reset;
         done = span.end;
     }
-    std::cout << std::string_view(line.text).substr(done);
+    std::cout << shown(std::string_view(line.text).substr(done), escape);
 }
 
 // Prints one file's results, grep style:
@@ -286,13 +297,15 @@ void printHighlighted(const ResultLine& line, const Colors& colors) {
 // With -C, "--" goes between groups of lines that aren't next to each other.
 class TextPrinter {
 public:
-    TextPrinter(std::size_t contextLines, Colors colors)
-        : contextLines_(contextLines), colors_(colors) {}
+    // `escape`: make the text safe for a terminal (see escapeForTerminal).
+    TextPrinter(std::size_t contextLines, Colors colors, bool escape)
+        : contextLines_(contextLines), colors_(colors), escape_(escape) {}
 
     void file(const ResultFile& file) {
         const std::string prefix = file.repo.empty() ? "" : file.repo + ":";
+        const std::string path = shown(file.path, escape_);
         if (file.lines.empty()) {
-            std::cout << colors_.path << prefix << file.path << colors_.reset << '\n';
+            std::cout << colors_.path << prefix << path << colors_.reset << '\n';
             return;
         }
         std::size_t previous = 0;
@@ -302,14 +315,14 @@ public:
                 std::cout << colors_.separator << "--" << colors_.reset << '\n';
             }
             const char separator = line.matches.empty() ? '-' : ':';
-            std::cout << colors_.path << prefix << file.path << colors_.reset << colors_.separator
+            std::cout << colors_.path << prefix << path << colors_.reset << colors_.separator
                       << separator << colors_.reset << colors_.number << line.number
                       << colors_.reset << colors_.separator << separator << colors_.reset;
             if (!line.matches.empty()) {
                 std::cout << colors_.number << line.matches[0].begin + 1 << colors_.reset
                           << colors_.separator << ':' << colors_.reset;
             }
-            printHighlighted(line, colors_);
+            printHighlighted(line, colors_, escape_);
             std::cout << '\n';
             previous = line.number;
             printedLines_ = true;
@@ -319,6 +332,7 @@ public:
 private:
     std::size_t contextLines_;
     Colors colors_;
+    bool escape_;
     bool printedLines_ = false;
 };
 
@@ -333,6 +347,62 @@ extern "C" void onInterrupt(int /*signal*/) {
     // A second Ctrl-C stops the program right away. signal() is safe to
     // call in a handler.
     static_cast<void>(std::signal(SIGINT, SIG_DFL));
+}
+
+// Runs the search and prints the results, as text or JSON. Sets `found` if
+// there was any. If the search fails partway, JSON output is still ended as
+// one whole document, saying why.
+SearchStatus printResults(std::span<const SearchTarget> targets, const SearchRequest& request,
+                          const SearchArgs& args, bool& found) {
+    std::optional<JsonResultWriter> json;
+    if (args.json) {
+        json.emplace(std::cout);
+    }
+    // On a terminal, a file's bytes could send it commands (like ESC
+    // sequences), so they're escaped. Colors mean a terminal too, maybe
+    // behind a pager like `less -R`. Into a pipe or file, bytes stay as
+    // they are, for other programs to read.
+    const Colors colors = pickColors(args.color);
+    const bool escape = ::isatty(STDOUT_FILENO) == 1 || !colors.reset.empty();
+    TextPrinter text(args.contextLines, colors, escape);
+
+    static_cast<void>(std::signal(SIGINT, onInterrupt));
+    SearchStatus status = SearchStatus::Complete;
+    try {
+        status = searchRepos(targets, request, [&](const ResultFile& file) {
+            found = true;
+            if (json.has_value()) {
+                json->file(file);
+            } else {
+                text.file(file);
+            }
+            // The reader went away (like `| head` after enough lines): stop
+            // now instead of searching on for output nobody reads.
+            if (!std::cout) {
+                throw std::runtime_error("could not write the output");
+            }
+        });
+    } catch (const RepoIndexError& error) {
+        const std::string message = error.what() + rebuildHint(error.repo());
+        if (json.has_value()) {
+            json->fail(message);  // so what's printed so far is still whole JSON
+        }
+        throw IndexFileError(message);
+    } catch (const std::exception& error) {
+        if (json.has_value()) {
+            json->fail(error.what());
+        }
+        throw;
+    }
+    static_cast<void>(std::signal(SIGINT, SIG_DFL));
+
+    if (json.has_value()) {
+        json->finish(status);
+    } else if (status == SearchStatus::Truncated) {
+        std::cerr << "code-search: stopped after " << args.maxResults
+                  << " results (--max-results); there are more\n";
+    }
+    return status;
 }
 
 int runSearch(const SearchArgs& args) {
@@ -379,34 +449,7 @@ int runSearch(const SearchArgs& args) {
     }
 
     bool found = false;
-    std::optional<JsonResultWriter> json;
-    if (args.json) {
-        json.emplace(std::cout);
-    }
-    TextPrinter text(args.contextLines, pickColors(args.color));
-
-    static_cast<void>(std::signal(SIGINT, onInterrupt));
-    SearchStatus status = SearchStatus::Complete;
-    try {
-        status = searchRepos(targets, request, [&](const ResultFile& file) {
-            found = true;
-            if (json.has_value()) {
-                json->file(file);
-            } else {
-                text.file(file);
-            }
-        });
-    } catch (const RepoIndexError& error) {
-        throw IndexFileError(error.what() + rebuildHint(error.repo()));
-    }
-    static_cast<void>(std::signal(SIGINT, SIG_DFL));
-
-    if (json.has_value()) {
-        json->finish(status);
-    } else if (status == SearchStatus::Truncated) {
-        std::cerr << "code-search: stopped after " << args.maxResults
-                  << " results (--max-results); there are more\n";
-    }
+    const SearchStatus status = printResults(targets, request, args, found);
     if (status == SearchStatus::Cancelled) {
         std::cerr << "code-search: cancelled\n";
         return 130;  // what shells use for "stopped by Ctrl-C"

@@ -328,6 +328,19 @@ TEST(CliQuery, Color) {
     EXPECT_EQ(searchIn(repo, {"--color=never", "three"}).out, "a.go:3:1:three\n");
 }
 
+// A file's bytes mustn't be able to control the terminal: with colors (so a
+// terminal), escape sequences in the text and the path show as \xHH. Into
+// a pipe without colors, the bytes stay as they are.
+TEST(CliQuery, ControlBytesAreShownNotSentToTheTerminal) {
+    TempRepo repo;
+    repo.write("bell\x07.txt", "evil \x1b]0;title\x07 here\n");
+    repo.commit();
+    EXPECT_EQ(searchIn(repo, {"--color=always", "evil"}).out,
+              "\033[35mbell\\x07.txt\033[0m\033[36m:\033[0m\033[32m1\033[0m\033[36m:\033[0m"
+              "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mevil\033[0m \\x1b]0;title\\x07 here\n");
+    EXPECT_EQ(searchIn(repo, {"evil"}).out, "bell\x07.txt:1:1:evil \x1b]0;title\x07 here\n");
+}
+
 // ---- Added repos ----
 
 ProcessResult addRepo(const TempDir& home, const TempRepo& repo, const std::string& name) {
@@ -565,6 +578,15 @@ TEST(CliRepos, DamageFoundWhileSearchingNamesTheFix) {
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "demo: index file is damaged")) << result.err;
     EXPECT_TRUE(contains(result.err, "code-search update demo --rebuild")) << result.err;
+
+    // With --json, the output is still one whole document, saying why it ended.
+    result = codeSearch({"search", "--json", "target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(result.out.starts_with("{\"files\":[")) << result.out;
+    EXPECT_TRUE(
+        contains(result.out, "],\"status\":\"error\",\"error\":\"demo: index file is damaged"))
+        << result.out;
+    EXPECT_TRUE(result.out.ends_with("code-search update demo --rebuild\"}\n")) << result.out;
 
     // The file still opens, so a plain update doesn't notice. --rebuild fixes it.
     EXPECT_TRUE(contains(codeSearch({"update", "demo"}, home.dir()).out, "is up to date"));

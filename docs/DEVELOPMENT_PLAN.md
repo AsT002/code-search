@@ -308,6 +308,13 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   (1.3 GB where one thread used 54 MiB). It now keeps them to about 32 MiB.
   When a pool can't be started, or there's one core, searches and builds
   run on the calling thread.
+- A cleanup pass after M7 closed the smaller findings of earlier reviews,
+  each with a test: a match starting in a line ending is shown on the next
+  line; `--json` output ends with `"status":"error"` when a search fails
+  partway; text to a terminal escapes control bytes; a closed output stops
+  the search at once (`search the | head -1`: 132 ms to 20 ms); a missing
+  `registry.json` no longer lets cleanup delete everything; GitHub URLs are
+  compared without case; and `--max-results 0` is documented.
 - The first version of the parallel search had a race: a task signaled the
   condition variable after letting go of the lock, so the search could be
   destroyed first. The differential test hung on it now and then. Tasks now

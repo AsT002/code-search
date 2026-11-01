@@ -127,6 +127,8 @@ TEST(RepoManager, AddSearchListRemove) {
     EXPECT_EQ(added.repo.location, std::filesystem::canonical(backend.dir()).string());
     EXPECT_EQ(added.report.indexed.files, 2U);
     manager.add("https://github.com/example/frontend.git", "");  // name from the URL
+    // GitHub names don't depend on case, so this is the same repo.
+    EXPECT_THROW(manager.add("https://github.com/Example/FrontEnd", "again"), std::runtime_error);
 
     const Registry registry = loadRegistry(workspace);
     ASSERT_EQ(registry.repos.size(), 2U);
@@ -270,7 +272,7 @@ TEST(RepoManager, AddsOnlyTheTopFolderOfARepo) {
             },
             "is inside a repo's .git folder");
     }
-    EXPECT_FALSE(std::filesystem::exists(workspace.registryFile()));
+    EXPECT_TRUE(loadRegistry(workspace).repos.empty());
 
     // A bare repo is its own top folder.
     const std::filesystem::path bare = home.file("bare.git");
@@ -746,6 +748,35 @@ TEST(RepoManager, SymlinkedFolderStopsAdd) {
         },
         "must be a plain folder");
     EXPECT_EQ(namesIn(home.file("elsewhere")), (std::set<std::string>{"precious.txt"}));
+}
+
+// Cleanup deletes the index files and clones the registry doesn't list, so
+// without registry.json it would delete them all. Changes refuse instead.
+TEST(RepoManager, MissingRegistryDeletesNothing) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    fillBackend(backend);
+    TempRepo other;
+    other.write("x.txt", "x\n");
+    other.commit();
+    RepoManager manager(workspace, noGitHub());
+    manager.add(backend.dir().string(), "backend");
+    const std::string indexFile = loadRegistry(workspace).repos[0].index.file;
+    std::filesystem::remove(workspace.registryFile());
+
+    expectError(
+        [&] {
+            manager.add(other.dir().string(), "other");
+        },
+        "registry.json is missing");
+    expectError(
+        [&] {
+            manager.remove("backend");
+        },
+        "registry.json is missing");
+    EXPECT_TRUE(std::filesystem::exists(workspace.indexesDir() / indexFile));
+    EXPECT_FALSE(std::filesystem::exists(workspace.registryFile()));
 }
 
 TEST(RepoManager, KilledRegistrySaveIsCleanedUp) {

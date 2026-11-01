@@ -135,26 +135,56 @@ std::vector<Span> sortedSpans(const FileView& file, const QueryNode& query) {
     return spans;
 }
 
+// True if text[i] is a '\n' or a '\r' right before one.
+bool isLineEndingByte(std::string_view text, std::size_t i) {
+    if (text[i] == '\n') {
+        return true;
+    }
+    return text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n';
+}
+
 // Line and column of a match, by counting newlines from the start each time.
+// A match that starts in a line ending begins at its first other byte; one
+// made only of line endings stays where it is.
 Match position(std::string_view text, Span span) {
+    std::size_t start = span.begin;
+    while (start < span.end && isLineEndingByte(text, start)) {
+        ++start;
+    }
+    if (start == span.end) {
+        start = span.begin;
+    }
     std::size_t line = 1;
     std::size_t lineStart = 0;
-    for (std::size_t i = 0; i < span.begin; ++i) {
+    for (std::size_t i = 0; i < start; ++i) {
         if (text[i] == '\n') {
             ++line;
             lineStart = i + 1;
         }
     }
     Match match;
-    match.bytes = span;
+    match.bytes = Span{start, span.end};
     match.line = line;
-    match.column = span.begin - lineStart + 1;
+    match.column = start - lineStart + 1;
     return match;
 }
 
+// Every span's position, in order of where they start.
+std::vector<Match> positions(std::string_view text, const std::vector<Span>& spans) {
+    std::vector<Match> matches;
+    matches.reserve(spans.size());
+    for (const Span span : spans) {
+        matches.push_back(position(text, span));
+    }
+    std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+        return a.bytes.begin < b.bytes.begin;
+    });
+    return matches;
+}
+
 // A match as a line number and a range inside that line's text.
-BruteLine lineOf(std::string_view text, Span span) {
-    const Match match = position(text, span);
+BruteLine lineOf(std::string_view text, const Match& match) {
+    const Span span = match.bytes;
     const std::size_t lineStart = span.begin - (match.column - 1);
     std::size_t lineEnd = lineStart;
     while (lineEnd < text.size() && text[lineEnd] != '\n') {
@@ -188,9 +218,7 @@ SearchResults bruteForceSearch(const std::vector<TestFile>& files, const QueryNo
         FileMatch match;
         match.doc = static_cast<DocId>(id);
         match.path = file.path;
-        for (const Span span : sortedSpans(view, query)) {
-            match.matches.push_back(position(file.content, span));
-        }
+        match.matches = positions(file.content, sortedSpans(view, query));
         results.files.push_back(match);
     }
     return results;
@@ -211,8 +239,8 @@ std::vector<BruteFile> bruteForceRepoSearch(const std::vector<TestRepo>& repos,
                 continue;
             }
             BruteFile found{.repo = repo.name, .path = file.path, .lines = {}};
-            for (const Span span : sortedSpans(view, query)) {
-                BruteLine line = lineOf(file.content, span);
+            for (const Match& at : positions(file.content, sortedSpans(view, query))) {
+                BruteLine line = lineOf(file.content, at);
                 if (!found.lines.empty() && found.lines.back().number == line.number) {
                     found.lines.back().matches.push_back(line.matches[0]);
                 } else {

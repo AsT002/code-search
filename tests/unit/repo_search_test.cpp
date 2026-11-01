@@ -144,6 +144,20 @@ TEST(ResultLines, OnlyACrBeforeANewlineIsHidden) {
     EXPECT_EQ(linesFor("a\rb\r\n", "b", 0), (std::vector<ResultLine>{hit(1, "a\rb", {{2, 3}})}));
 }
 
+// A match that starts in a line ending is shown where its text starts, on
+// the next line, not as an empty highlight at the end of the line before.
+TEST(ResultLines, AMatchStartingInALineEndingIsShownOnTheNextLine) {
+    EXPECT_EQ(linesFor("foo\r\nbar", "\nba", 0),
+              (std::vector<ResultLine>{hit(2, "bar", {{0, 2}})}));
+    EXPECT_EQ(linesFor("foo\r\nbar", "\r\nb", 0),
+              (std::vector<ResultLine>{hit(2, "bar", {{0, 1}})}));
+    EXPECT_EQ(linesFor("x\n\nyz", "\n\ny", 0), (std::vector<ResultLine>{hit(3, "yz", {{0, 1}})}));
+    // Only line endings: nothing to show, so it stays at the end of its line.
+    EXPECT_EQ(linesFor("ab\ncd", "\n", 0), (std::vector<ResultLine>{hit(1, "ab", {{2, 2}})}));
+    // A lone CR is text, so a match starting there stays on its line.
+    EXPECT_EQ(linesFor("a\rb", "\rb", 0), (std::vector<ResultLine>{hit(1, "a\rb", {{1, 3}})}));
+}
+
 TEST(ResultLines, MatchesAreCutAtTheEndOfTheLine) {
     // The match runs into the next line and over the CR, which isn't shown.
     EXPECT_EQ(linesFor("ab\r\ncd", "b\r\nc", 0), (std::vector<ResultLine>{hit(1, "ab", {{1, 2}})}));
@@ -473,7 +487,7 @@ TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
 
 // Results sizes measured so far can mislead: here the first 64 files have
 // no matches, so the files after them looked cheap, and the pool took on
-// hundreds of files where every line matches (about 100 MiB). What's held
+// over a hundred files where every line matches (about 65 MiB). What's held
 // must be limited by the bytes actually made, not by a guess.
 TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
     IndexBuilder builder;
@@ -485,7 +499,9 @@ TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
     for (int i = 0; i < 64; ++i) {
         builder.add("a" + std::to_string(i), none);
     }
-    for (int i = 0; i < 256; ++i) {
+    // 128 files of about 0.6 MB of results each: far more than the limit,
+    // and few enough to stay quick under ThreadSanitizer.
+    for (int i = 0; i < 128; ++i) {
         builder.add("b" + std::to_string(i), dense);
     }
     const MemoryIndex index = builder.build();
@@ -513,8 +529,8 @@ TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
     gCounting = false;
     EXPECT_EQ(status, SearchStatus::Complete);
     std::vector<std::string> expected;
-    expected.reserve(256);
-    for (int i = 0; i < 256; ++i) {
+    expected.reserve(128);
+    for (int i = 0; i < 128; ++i) {
         expected.push_back("b" + std::to_string(i));
     }
     EXPECT_EQ(paths, expected);  // all of them, in order
@@ -764,6 +780,28 @@ TEST(SearchReposOnAPool, Cancel) {
     SearchStatus status = SearchStatus::Complete;
     EXPECT_TRUE(found(targets, request, &status).empty());
     EXPECT_EQ(status, SearchStatus::Cancelled);
+}
+
+// When the caller can't take results (its output closed, say), it throws,
+// and the search stops right away instead of reading every file.
+TEST(SearchRepos, AnErrorFromTheCallerStopsTheSearch) {
+    const MemoryIndex index = manyFiles(1000);
+    ThreadPool pool(2);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "pool");
+        CountingIndex counted(index);
+        const std::vector<SearchTarget> targets = {{.name = "r", .index = &counted}};
+        SearchRequest request;
+        request.query = literal("needle");
+        request.pool = threads;
+        EXPECT_THROW(searchRepos(targets, request,
+                                 [](const ResultFile&) {
+                                     throw std::runtime_error("could not write the output");
+                                 }),
+                     std::runtime_error);
+        // One thread reads the first file; the pool, a few chunks ahead.
+        EXPECT_LE(counted.reads(), threads == nullptr ? 1 : 200);
+    }
 }
 
 TEST(SearchRepos, DamageNamesTheRepo) {

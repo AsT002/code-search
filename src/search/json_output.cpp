@@ -97,4 +97,12 @@ void JsonResultWriter::finish(SearchStatus status) {
     *out_ << (first_ ? "" : "\n") << R"(],"status":")" << statusName(status) << "\"}\n";
 }
 
+void JsonResultWriter::fail(std::string_view message) {
+    const Json text = std::string(message);
+    // dump(-1, ' ', false, replace): no indenting, keep non-ASCII as it is,
+    // and turn bytes that aren't valid UTF-8 into U+FFFD instead of throwing.
+    *out_ << (first_ ? "" : "\n") << R"(],"status":"error","error":)"
+          << text.dump(-1, ' ', false, Json::error_handler_t::replace) << "}\n";
+}
+
 }  // namespace codesearch
