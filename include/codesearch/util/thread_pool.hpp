@@ -17,9 +17,10 @@ namespace codesearch {
 // Tasks must not throw; catch inside the task and pass the error back.
 class ThreadPool {
 public:
+    // Throws std::system_error if the system can't start that many threads.
     explicit ThreadPool(std::size_t threads);
     // Runs every task still in the queue, then stops the threads.
-    ~ThreadPool();
+    virtual ~ThreadPool();
 
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
@@ -28,11 +29,14 @@ public:
 
     std::size_t size() const { return threads_.size(); }
 
-    // Adds a task to the queue. Some thread runs it later.
-    void submit(std::function<void()> task);
+    // Adds a task to the queue. Some thread runs it later. Can throw (if
+    // memory runs out); then the task never runs. Virtual so tests can make
+    // it fail.
+    virtual void submit(std::function<void()> task);
 
 private:
     void work();
+    void stopAndJoin();
 
     std::mutex mutex_;
     std::condition_variable wake_;  // signaled when a task arrives or we stop

@@ -94,23 +94,31 @@ private:
             addOldest();
         }
         Batch* batch = current_.get();
-        bytesInFlight_ += batch->bytes;
         inFlight_.push_back(std::move(current_));
-        pool_->submit([this, batch] {
-            try {
-                batch->trigrams.reserve(batch->contents.size());
-                for (const std::string& content : batch->contents) {
-                    batch->trigrams.push_back(extractTrigrams(content));
+        bytesInFlight_ += batch->bytes;
+        try {
+            pool_->submit([this, batch] {
+                try {
+                    batch->trigrams.reserve(batch->contents.size());
+                    for (const std::string& content : batch->contents) {
+                        batch->trigrams.push_back(extractTrigrams(content));
+                    }
+                } catch (...) {  // a task must not throw; addOldest passes it on
+                    batch->error = std::current_exception();
                 }
-            } catch (...) {  // a task must not throw; addOldest passes it on
-                batch->error = std::current_exception();
-            }
-            // Signal under the lock: once it's let go, the adder may be
-            // destroyed, and this task must not touch it after that.
-            const std::scoped_lock lock(mutex_);
-            batch->done = true;
-            batchDone_.notify_all();
-        });
+                // Signal under the lock: once it's let go, the adder may be
+                // destroyed, and this task must not touch it after that.
+                const std::scoped_lock lock(mutex_);
+                batch->done = true;
+                batchDone_.notify_all();
+            });
+        } catch (...) {
+            // The task never got queued, so the batch would never be done.
+            // Take it back out, or the destructor would wait for it forever.
+            bytesInFlight_ -= batch->bytes;
+            inFlight_.pop_back();
+            throw;
+        }
     }
 
     // Waits for the oldest batch and adds its files, in order.

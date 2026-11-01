@@ -2,11 +2,49 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <cstdlib>
+#include <new>
 #include <string>
 #include <vector>
 
+#include "../support/failing_pool.hpp"
 #include "codesearch/index/memory_index.hpp"
 #include "codesearch/search/evaluator.hpp"
+
+// Counts the bytes allocated with new while gCounting is on, so a test can
+// check how much a search allocates. Replacing the global operator new is
+// the standard way to see allocations; it applies to this whole test program.
+namespace {
+// Globals, because operator new has nowhere else to keep them.
+std::atomic<bool> gCounting = false;      // NOLINT(*-avoid-non-const-global-variables)
+std::atomic<std::size_t> gAllocated = 0;  // NOLINT(*-avoid-non-const-global-variables)
+}  // namespace
+
+// The parameters are named as in libc++'s own declarations, because
+// clang-tidy wants the names to match and can't be told otherwise there.
+// Names starting with __ are reserved for the library, hence the NOLINT.
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+void* operator new(std::size_t __sz) {
+    if (gCounting) {
+        gAllocated += __sz;
+    }
+    void* memory = std::malloc(__sz == 0 ? 1 : __sz);  // NOLINT(*-no-malloc,*-owning-memory)
+    if (memory == nullptr) {
+        throw std::bad_alloc();
+    }
+    return memory;
+}
+
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+void operator delete(void* __p) noexcept {
+    std::free(__p);  // NOLINT(*-no-malloc,*-owning-memory)
+}
+
+// NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
+void operator delete(void* __p, std::size_t /*__sz*/) noexcept {
+    std::free(__p);  // NOLINT(*-no-malloc,*-owning-memory)
+}
 
 namespace codesearch {
 namespace {
@@ -275,6 +313,110 @@ TEST(SearchReposOnAPool, LimitStopsReadingEarly) {
     // 4 chunks of 16 files in flight with one thread, and the results need
     // only the first 2 files read again.
     EXPECT_LE(counted.reads(), (4 * 16) + 2);
+}
+
+// With a limit, the pool makes only as many result lines per file as the
+// limit allows. Before, it made every line of every file it read ahead,
+// over 2 MiB here for one result.
+TEST(SearchReposOnAPool, LimitBoundsWhatIsPrepared) {
+    IndexBuilder builder;
+    const std::string line = std::string(2000, 'x') + " needle\n";
+    for (int i = 0; i < 32; ++i) {
+        std::string content;
+        for (int n = 0; n < 32; ++n) {
+            content += line;
+        }
+        builder.add("f" + std::to_string(i), content);
+    }
+    const MemoryIndex index = builder.build();
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("needle");
+    request.maxResults = 1;
+    request.pool = &pool;
+
+    std::size_t lines = 0;
+    gAllocated = 0;
+    gCounting = true;
+    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
+        lines += file.lines.size();
+    });
+    gCounting = false;
+    EXPECT_EQ(status, SearchStatus::Truncated);
+    EXPECT_EQ(lines, 1U);
+    EXPECT_LT(gAllocated.load(), std::size_t{512} << 10U) << "bytes allocated";
+}
+
+// Damage past the limit is never reached one file at a time, so the pool
+// mustn't report it either. Without a limit, the files before it come first.
+TEST(SearchReposOnAPool, DamageAfterTheLimitIsntReported) {
+    class BrokenAtTwo : public CountingIndex {
+    public:
+        using CountingIndex::CountingIndex;
+        void withContent(DocId doc,
+                         const std::function<void(std::string_view)>& fn) const override {
+            if (doc == 2) {
+                throw IndexFileError("index file is damaged: test");
+            }
+            CountingIndex::withContent(doc, fn);
+        }
+    };
+    const MemoryIndex index = manyFiles(5);
+    const BrokenAtTwo broken(index);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &broken}};
+    ThreadPool pool(2);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "pool");
+        SearchRequest request;
+        request.query = literal("needle");
+        request.pool = threads;
+        request.maxResults = 1;
+        SearchStatus status = SearchStatus::Complete;
+        EXPECT_EQ(found(targets, request, &status), (std::vector<std::string>{"r:f1000.go:1"}));
+        EXPECT_EQ(status, SearchStatus::Truncated);
+
+        request.maxResults = 0;
+        std::vector<std::string> before;
+        EXPECT_THROW(searchRepos(targets, request,
+                                 [&](const ResultFile& file) {
+                                     before.push_back(file.path);
+                                 }),
+                     RepoIndexError);
+        EXPECT_EQ(before, (std::vector<std::string>{"f1000.go", "f1001.go"}));
+    }
+}
+
+// Cancelling while the pool has files waiting stops before the next one.
+TEST(SearchReposOnAPool, CancelBetweenFilesOfAChunk) {
+    const MemoryIndex index = manyFiles(3);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(2);
+    std::atomic<bool> cancelled = false;
+    SearchRequest request;
+    request.query = literal("needle");
+    request.cancelled = &cancelled;
+    request.pool = &pool;
+    std::size_t files = 0;
+    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& /*file*/) {
+        ++files;
+        cancelled = true;
+    });
+    EXPECT_EQ(status, SearchStatus::Cancelled);
+    EXPECT_EQ(files, 1U);
+}
+
+// A task that can't be queued must not leave the search waiting for it.
+TEST(SearchReposOnAPool, FailedSubmitIsAnErrorNotAHang) {
+    const MemoryIndex index = manyFiles(200);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    testing::FailingPool pool(2, 1);
+    SearchRequest request;
+    request.query = literal("needle");
+    request.pool = &pool;
+    testing::failIfItHangs([&] {
+        EXPECT_THROW(searchRepos(targets, request, [](const ResultFile&) {}), std::bad_alloc);
+    });
 }
 
 TEST(SearchReposOnAPool, Cancel) {

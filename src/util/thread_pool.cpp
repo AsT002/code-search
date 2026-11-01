@@ -8,14 +8,26 @@ namespace codesearch {
 ThreadPool::ThreadPool(std::size_t threads) {
     threads = std::max<std::size_t>(threads, 1);
     threads_.reserve(threads);
-    for (std::size_t i = 0; i < threads; ++i) {
-        threads_.emplace_back([this] {
-            work();
-        });
+    try {
+        for (std::size_t i = 0; i < threads; ++i) {
+            threads_.emplace_back([this] {
+                work();
+            });
+        }
+    } catch (...) {
+        // The system ran out of threads partway. The destructor doesn't run
+        // for a half-built object, and destroying a thread that wasn't
+        // joined ends the whole program, so stop the ones we have first.
+        stopAndJoin();
+        throw;
     }
 }
 
 ThreadPool::~ThreadPool() {
+    stopAndJoin();
+}
+
+void ThreadPool::stopAndJoin() {
     {
         const std::scoped_lock lock(mutex_);
         stopping_ = true;

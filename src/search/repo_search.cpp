@@ -166,26 +166,43 @@ std::vector<ResultLine> resultLines(std::string_view content, std::span<const Ma
 namespace {
 
 // Turns one matching file into a result and passes it to onFile, keeping to
-// the limit. `remaining` is how many more results the limit allows; it goes
-// down as results are found. Returns false once the limit is used up.
-bool emit(const std::string& repo, const FileMatch& match, std::string_view content,
-          const SearchRequest& request, std::size_t& remaining,
-          const std::function<void(const ResultFile& file)>& onFile) {
+// the limit. `lineCount` is how many lines of the file have matches;
+// `matches` must cover at least the first `remaining` of them. `remaining`
+// is how many more results the limit allows; it goes down as results are
+// found. Returns false once the limit is used up.
+bool emit(const std::string& repo, const std::string& path, std::span<const Match> matches,
+          std::size_t lineCount, std::string_view content, const SearchRequest& request,
+          std::size_t& remaining, const std::function<void(const ResultFile& file)>& onFile) {
     if (remaining == 0) {
         return false;  // there's more than the limit allows
     }
-    ResultFile file{.repo = repo, .path = match.path, .lines = {}};
-    if (request.filesOnly || match.matches.empty()) {
+    ResultFile file{.repo = repo, .path = path, .lines = {}};
+    if (request.filesOnly || lineCount == 0) {
         --remaining;  // the file itself is the result
         onFile(file);
         return true;
     }
-    const std::size_t found = countLines(match.matches);
-    const std::size_t shown = std::min(found, remaining);
-    file.lines = resultLines(content, match.matches, request.contextLines, shown);
+    const std::size_t shown = std::min(lineCount, remaining);
+    file.lines = resultLines(content, matches, request.contextLines, shown);
     remaining -= shown;
     onFile(file);
-    return shown == found;  // false: this file had more than the limit allows
+    return shown == lineCount;  // false: this file had more than the limit allows
+}
+
+// Drops the matches past the first `lines` lines that have matches.
+void keepFirstLines(std::vector<Match>& matches, std::size_t lines) {
+    std::size_t seen = 0;
+    std::size_t previous = 0;  // lines start at 1, so 0 is never a match's line
+    for (std::size_t i = 0; i < matches.size(); ++i) {
+        if (matches[i].line != previous) {
+            if (seen == lines) {
+                matches.resize(i);
+                return;
+            }
+            ++seen;
+            previous = matches[i].line;
+        }
+    }
 }
 
 // An IndexFileError from searching `repo`, with the repo's name in front.
@@ -215,7 +232,8 @@ SearchStatus searchInTurn(std::span<const SearchTarget> targets, const SearchReq
             status = forEachMatch(
                 *target.index, query, request.options,
                 [&](const FileMatch& match, std::string_view content) {
-                    return emit(target.name, match, content, request, remaining, onFile);
+                    return emit(target.name, match.path, match.matches, countLines(match.matches),
+                                content, request, remaining, onFile);
                 },
                 request.cancelled);
         } catch (const IndexFileError&) {
@@ -271,10 +289,15 @@ private:
         std::vector<DocId> candidates;
     };
 
-    // A matching file, with its result lines for every match already
-    // worked out, so the pool's threads do that work too.
+    // A matching file, with its result lines already worked out, so the
+    // pool's threads do that work too. With a limit, only as many lines as
+    // the limit allows are made, and only the matches on them are kept: a
+    // file never needs more than that.
     struct Found {
-        FileMatch match;
+        DocId doc = 0;
+        std::string path;
+        std::size_t lineCount = 0;   // lines with matches, in the whole file
+        std::vector<Match> matches;  // the matches on the lines in `lines`
         std::vector<ResultLine> lines;
     };
 
@@ -350,9 +373,17 @@ void ParallelSearch::submit(std::size_t chunk) {
         const std::scoped_lock lock(mutex_);
         ++submitted_;
     }
-    request_.pool->submit([this, chunk] {
-        check(chunks_[chunk]);
-    });
+    try {
+        request_.pool->submit([this, chunk] {
+            check(chunks_[chunk]);
+        });
+    } catch (...) {
+        // The task never got queued, so it will never finish. Don't let the
+        // destructor wait for it.
+        const std::scoped_lock lock(mutex_);
+        --submitted_;
+        throw;
+    }
 }
 
 // Runs on a pool thread: finds which of the chunk's files match.
@@ -368,16 +399,20 @@ void ParallelSearch::check(Chunk& chunk) {
                     return;
                 }
                 Found& found = chunk.found.emplace_back();
-                found.match = FileMatch{
-                    .doc = doc,
-                    .path = std::string(path),
-                    .matches = locate(content, repo.evaluator->collectSpans(doc, path, content)),
-                };
-                if (!request_.filesOnly && !found.match.matches.empty()) {
-                    const std::size_t all = std::numeric_limits<std::size_t>::max();
-                    found.lines =
-                        resultLines(content, found.match.matches, request_.contextLines, all);
+                found.doc = doc;
+                found.path = std::string(path);
+                std::vector<Match> matches =
+                    locate(content, repo.evaluator->collectSpans(doc, path, content));
+                found.lineCount = countLines(matches);
+                if (request_.filesOnly || found.lineCount == 0) {
+                    return;  // the file itself is the result
                 }
+                const std::size_t kept = request_.maxResults == 0
+                                             ? found.lineCount
+                                             : std::min(found.lineCount, request_.maxResults);
+                found.lines = resultLines(content, matches, request_.contextLines, kept);
+                keepFirstLines(matches, kept);
+                found.matches = std::move(matches);
             });
         }
     } catch (...) {  // a task must not throw; run() passes it on
@@ -393,26 +428,29 @@ void ParallelSearch::check(Chunk& chunk) {
 }
 
 // Passes one file on, like emit() but with the lines a pool thread made.
-// Only a file the limit cuts short needs its lines made again, with fewer.
+// Those are every line the file has if it fits in what's left of the limit
+// (the limit only goes down). Only a file the limit cuts short needs its
+// lines made again, with fewer.
 bool ParallelSearch::pass(const Repo& repo, Found& found, std::size_t& remaining) {
-    const FileMatch& match = found.match;
-    const bool hasLines = !request_.filesOnly && !match.matches.empty();
-    if (hasLines && remaining != 0 && countLines(match.matches) <= remaining) {
-        remaining -= countLines(match.matches);
+    const std::string& name = repo.target->name;
+    const bool hasLines = !request_.filesOnly && found.lineCount != 0;
+    if (hasLines && remaining != 0 && found.lineCount <= remaining) {
+        remaining -= found.lineCount;
         onFile_(ResultFile{
-            .repo = repo.target->name,
-            .path = match.path,
+            .repo = name,
+            .path = found.path,
             .lines = std::move(found.lines),
         });
         return true;
     }
     if (!hasLines) {
-        return emit(repo.target->name, match, "", request_, remaining, onFile_);
+        return emit(name, found.path, {}, found.lineCount, "", request_, remaining, onFile_);
     }
     bool keepGoing = false;
     try {
-        repo.target->index->withContent(match.doc, [&](std::string_view content) {
-            keepGoing = emit(repo.target->name, match, content, request_, remaining, onFile_);
+        repo.target->index->withContent(found.doc, [&](std::string_view content) {
+            keepGoing = emit(name, found.path, found.matches, found.lineCount, content, request_,
+                             remaining, onFile_);
         });
     } catch (const IndexFileError&) {
         rethrowNamed(std::current_exception(), repo.target->name);
@@ -437,18 +475,24 @@ SearchStatus ParallelSearch::run() {
                 return chunk.done;
             });
         }
-        // A chunk cut short by cancelling isn't complete, so check first.
-        if (cancelled()) {
-            return SearchStatus::Cancelled;
-        }
+        // Check for cancelling before each file, as searchInTurn does. A
+        // chunk cut short by cancelling isn't complete, so check first.
         const Repo& repo = repos_[chunk.repo];
-        if (chunk.error) {
-            rethrowNamed(chunk.error, repo.target->name);
-        }
         for (Found& found : chunk.found) {
+            if (cancelled()) {
+                return SearchStatus::Cancelled;
+            }
             if (!pass(repo, found, remaining)) {
                 return SearchStatus::Truncated;
             }
+        }
+        if (cancelled()) {
+            return SearchStatus::Cancelled;
+        }
+        // A task stops at the first damaged file, keeping the matches before
+        // it. Those come first, as with searchInTurn.
+        if (chunk.error) {
+            rethrowNamed(chunk.error, repo.target->name);
         }
         chunk.found = {};  // let go of the memory
         if (next + window < chunks_.size()) {

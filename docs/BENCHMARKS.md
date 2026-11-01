@@ -182,15 +182,18 @@ prints the results as text to a pipe.
 | short | 3.39 / 6.43 | 4.54 / 6.90 | 447.6 / 1633 | 230.1 / 1128 | 272 / 532 | 286 / 760 |
 | filter | 3.16 / 6.43 | 3.47 / 5.29 | 38.7 / 120.5 | 9.60 / 15.3 | | |
 | boolean | 11.4 / 21.5 | 3.40 / 6.25 | 92.0 / 163.0 | 7.84 / 14.0 | | |
-| case | 4.27 / 4.29 | 3.59 / 3.66 | 26.6 / 36.3 | 6.92 / 7.22 | 230 / 232 | 13.7 / 13.8 |
+| case | 4.27 / 4.29 | 3.59 / 3.66 | 26.6 / 36.3 | 6.92 / 7.22 | 230 / 232 | 250 / 252 |
 | long | 8.44 / 15.2 | 3.62 / 3.83 | 8.44 / 15.5 | 3.76 / 3.85 | 229 / 314 | 255 / 267 |
 
 About 3 ms of every fresh run is starting the program and opening the
 indexes. For big result sets, printing is now most of the time: `the` takes
 16 ms warm but 122 ms here, and `a` (2.1 million lines) is slower than `rg`.
-The text output, on one thread, is the next thing to speed up. `git grep`
-took 14 ms on the two case-sensitive queries and about 255 ms on every
-case-insensitive one; we didn't look into why.
+The text output, on one thread, is the next thing to speed up.
+
+The first run of the script passed `-s` to `git grep` for case-sensitive
+queries. To `git grep` that's an unknown option, so it failed in 14 ms, and
+the script counted that as a time. The script now checks exit codes, and the
+`git grep` case numbers above are from a rerun of that group.
 
 ### Build
 

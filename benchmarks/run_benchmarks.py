@@ -61,7 +61,11 @@ def timed_peak(cmd, env):
 
 
 def run_stream(cmd, env=None, cwd=None):
-    """Runs cmd, reading all its output. Returns (s to first byte, s to end)."""
+    """Runs cmd, reading all its output. Returns (s to first byte, s to end).
+
+    Exit code 1 means nothing was found, for code-search, rg and git grep
+    alike. Anything above that is a failure, not a timing, so it raises.
+    """
     start = time.perf_counter()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, cwd=cwd)
     first = None
@@ -71,8 +75,10 @@ def run_stream(cmd, env=None, cwd=None):
             break
         if first is None:
             first = time.perf_counter() - start
-    proc.wait()
+    code = proc.wait()
     total = time.perf_counter() - start
+    if code not in (0, 1):
+        raise RuntimeError(f"{cmd} exited with {code}")
     return (first if first is not None else total), total
 
 
@@ -143,13 +149,16 @@ def bench_search(cs, queries, repos, repo_dir, env, runs):
         plain = plain_text(query)
         if plain is not None:
             text, case_sensitive = plain
-            case = "-s" if case_sensitive else "-i"
-            _, rg_all = median_of(lambda: run_stream(["rg", "-F", case, "-n", "--no-heading", "--", text] + checkouts))
+            # rg's -s means case-sensitive. git grep is case-sensitive unless
+            # given -i; its -s means something else.
+            rg_case = ["-s"] if case_sensitive else ["-i"]
+            git_case = [] if case_sensitive else ["-i"]
+            _, rg_all = median_of(lambda: run_stream(["rg", "-F"] + rg_case + ["-n", "--no-heading", "--", text] + checkouts))
 
             def git_grep():
                 first = total = 0.0
                 for checkout in checkouts:
-                    f, t = run_stream(["git", "grep", "-F", case, "-n", "-I", "--", text], cwd=checkout)
+                    f, t = run_stream(["git", "grep", "-F"] + git_case + ["-n", "-I", "--", text], cwd=checkout)
                     first = first or f
                     total += t
                 return first, total
@@ -206,10 +215,13 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--skip-build", action="store_true", help="reuse the workspace from an earlier run")
     parser.add_argument("--only", choices=["build", "search", "update"], help="run just one part")
+    parser.add_argument("--group", help="search only the queries in this group")
     args = parser.parse_args()
 
     repos = read_tsv(HERE / "repos.tsv")
     queries = read_tsv(HERE / "queries.tsv")
+    if args.group:
+        queries = [q for q in queries if q[0] == args.group]
     repo_dir = args.work_dir / "repos"
     for name, url, commit in repos:
         clone(url, commit, repo_dir / name)

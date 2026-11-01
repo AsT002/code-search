@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "../support/failing_pool.hpp"
 #include "../support/temp_repo.hpp"
 #include "codesearch/search/searcher.hpp"
 
@@ -256,6 +257,19 @@ TEST(IndexCommit, MissingFileContentsIsAnErrorOnAThreadPoolToo) {
     repo.removeObject(repo.blobId("f40.txt"));
     ThreadPool pool(4);
     EXPECT_THROW(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), &pool), GitError);
+}
+
+// A batch that can't be queued must not leave the build waiting for it.
+TEST(IndexCommit, FailedSubmitIsAnErrorNotAHang) {
+    TempRepo repo;
+    for (int i = 0; i < 40; ++i) {
+        repo.write("f" + std::to_string(i) + ".txt", std::string(100000, 'a') + std::to_string(i));
+    }
+    const ObjectId commit = repo.commit();
+    testing::FailingPool pool(2, 1);
+    testing::failIfItHangs([&] {
+        EXPECT_THROW(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), &pool), std::bad_alloc);
+    });
 }
 
 }  // namespace

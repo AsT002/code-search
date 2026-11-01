@@ -31,6 +31,7 @@ add_executable(codesearch_tests
   unit/publisher_test.cpp
   unit/registry_test.cpp
   unit/repo_search_test.cpp
+  unit/thread_pool_test.cpp
   unit/searcher_test.cpp
   unit/shard_test.cpp
   unit/trigram_test.cpp
