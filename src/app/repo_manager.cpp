@@ -76,25 +76,27 @@ Source resolveSource(const std::string& text, const Workspace& workspace) {
     };
 }
 
-// True if the folder exists and has anything in it.
-bool hasEntries(const std::filesystem::path& folder) {
-    return std::filesystem::exists(folder) &&
-           std::filesystem::directory_iterator(folder) != std::filesystem::directory_iterator();
+// The error for a registry.json that's gone while index files or clones
+// are still there.
+std::runtime_error missingRegistry(const Workspace& workspace) {
+    return std::runtime_error(workspace.registryFile().string() +
+                              ", which lists the added repos, is missing, but index files or "
+                              "clones are still in " +
+                              workspace.root().string() +
+                              ". Put back a copy of registry.json, or remove that folder to "
+                              "start over");
 }
 
 // The registry, for a change that holds the lock. Cleanup deletes every
 // index file and clone the registry doesn't list, so a registry.json that's
 // gone missing would delete them all. If it's missing while there are index
-// files or clones, refuse. If it's missing with nothing there, write an
-// empty one first: then a change killed before its first save still leaves
-// a registry, and the next cleanup removes what it left.
+// files or clones, refuse. If it's missing with none there, write an empty
+// one first: then a change killed before its first save still leaves a
+// registry, and the next cleanup removes what it left.
 Registry loadForChange(const Workspace& workspace, RegistryStore& store) {
     if (!std::filesystem::exists(workspace.registryFile())) {
-        if (hasEntries(workspace.indexesDir()) || hasEntries(workspace.reposDir())) {
-            throw std::runtime_error(
-                workspace.registryFile().string() +
-                " is missing, but there are index files or clones in " + workspace.root().string() +
-                ". Put registry.json back, or remove the folder to start over");
+        if (holdsIndexesOrClones(workspace)) {
+            throw missingRegistry(workspace);
         }
         store.save(Registry{});
     }
@@ -360,6 +362,11 @@ std::string rebuildHint(const std::string& name) {
 }
 
 Registry loadRegistry(const Workspace& workspace) {
+    // Without this, a lost registry.json would look like "nothing added
+    // yet", and the add that suggests would then refuse.
+    if (!std::filesystem::exists(workspace.registryFile()) && holdsIndexesOrClones(workspace)) {
+        throw missingRegistry(workspace);
+    }
     return JsonRegistryStore(workspace.registryFile()).load();
 }
 

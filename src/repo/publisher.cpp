@@ -23,7 +23,13 @@ void removeEntry(const std::filesystem::path& dir, const std::filesystem::direct
         throw std::runtime_error("refusing to delete " + real.string() + ": it isn't inside " +
                                  dir.string());
     }
-    std::filesystem::remove_all(real);  // doesn't follow symlinks inside it either
+    try {
+        std::filesystem::remove_all(real);  // doesn't follow symlinks inside it either
+    } catch (const std::filesystem::filesystem_error& error) {
+        throw std::runtime_error("could not delete " + real.string() +
+                                 ", which code-search no longer uses: " + error.code().message() +
+                                 ". Check its permissions, or delete it yourself");
+    }
 }
 
 // True for "r_1c2d3e4f-g0001.idx", the name of an index file of any repo.
@@ -107,6 +113,22 @@ std::filesystem::path writeToTmp(const Workspace& workspace, const MemoryIndex& 
 
 void moveIntoIndexes(const Workspace& workspace, const std::filesystem::path& tmpFile) {
     std::filesystem::rename(tmpFile, workspace.indexesDir() / tmpFile.filename());
+}
+
+bool holdsIndexesOrClones(const Workspace& workspace) {
+    const auto holds = [](const std::filesystem::path& folder, bool (*ours)(std::string_view)) {
+        if (!std::filesystem::exists(folder)) {
+            return false;
+        }
+        for (const std::filesystem::directory_entry& entry :
+             std::filesystem::directory_iterator(folder)) {
+            if (ours(entry.path().filename().string())) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return holds(workspace.indexesDir(), isIndexFile) || holds(workspace.reposDir(), isClone);
 }
 
 void cleanUp(const Workspace& workspace, const Registry& registry) {

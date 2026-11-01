@@ -752,6 +752,17 @@ TEST(RepoManager, SymlinkedFolderStopsAdd) {
 
 // Cleanup deletes the index files and clones the registry doesn't list, so
 // without registry.json it would delete them all. Changes refuse instead.
+// Files cleanup never deletes, like .DS_Store, don't block the first add.
+TEST(RepoManager, OtherFilesDontCountAsIndexes) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    workspace.create();
+    writeFile(workspace.indexesDir() / ".DS_Store", "x");
+    TempRepo backend;
+    fillBackend(backend);
+    EXPECT_NO_THROW(RepoManager(workspace, noGitHub()).add(backend.dir().string(), "backend"));
+}
+
 TEST(RepoManager, MissingRegistryDeletesNothing) {
     const TempDir home;
     const Workspace workspace(home.file("ws"));
@@ -769,12 +780,14 @@ TEST(RepoManager, MissingRegistryDeletesNothing) {
         [&] {
             manager.add(other.dir().string(), "other");
         },
-        "registry.json is missing");
+        "registry.json, which lists the added repos, is missing");
     expectError(
         [&] {
             manager.remove("backend");
         },
-        "registry.json is missing");
+        "registry.json, which lists the added repos, is missing");
+    // list and search say so too, instead of "nothing added yet".
+    EXPECT_THROW(loadRegistry(workspace), std::runtime_error);
     EXPECT_TRUE(std::filesystem::exists(workspace.indexesDir() / indexFile));
     EXPECT_FALSE(std::filesystem::exists(workspace.registryFile()));
 }

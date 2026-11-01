@@ -88,5 +88,26 @@ TEST(JsonResultWriter, AnErrorStillEndsTheDocument) {
         "],\"status\":\"error\",\"error\":\"r: index file is damaged: \\\"x\\\" \xef\xbf\xbd\"}\n");
 }
 
+// JSON may hold DEL and the C1 controls raw, but on a terminal they can
+// control it, so they're written as \u escapes, which mean the same text.
+TEST(Json, TerminalControlsAreEscaped) {
+    const ResultFile file{
+        .repo = "r",
+        .path = "a.txt",
+        .lines =
+            {
+                ResultLine{
+                    .number = 1,
+                    .text = "x\x7f \xc2\x9b"
+                            "31m \xc2\xa0",
+                    .matches = {},
+                },
+            },
+    };
+    const std::string json = resultFileJson(file);
+    // U+00A0 (C2 A0) is past the C1 range, so it stays as it is.
+    EXPECT_NE(json.find("\"text\":\"x\\u007f \\u009b31m \xc2\xa0\""), std::string::npos) << json;
+}
+
 }  // namespace
 }  // namespace codesearch

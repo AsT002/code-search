@@ -159,7 +159,8 @@ Status: done. Notes:
   Searches don't take it.
 - `Publisher`, under the lock: build in `tmp/`, check the file, fsync, rename it
   into `indexes/`, write the registry with a temp file and rename, delete unused
-  index files and leftovers in `tmp/`. Cleanup at startup takes the lock too.
+  index files and leftovers in `tmp/`. Cleanup runs at the start and end of
+  every `add`, `update` and `remove`, under the same lock.
 - Clones: `git clone --bare --depth 1 --single-branch --no-tags`. Only accept
   `https://github.com/<owner>/<repo>` (with or without `.git`).
 - Commands: `add` (local Git repo or GitHub URL, `--name`), `list`, `remove`, and
@@ -315,6 +316,12 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   the search at once (`search the | head -1`: 132 ms to 20 ms); a missing
   `registry.json` no longer lets cleanup delete everything; GitHub URLs are
   compared without case; and `--max-results 0` is documented.
+- A second round of reviews of that pass found more, all fixed with tests:
+  `--json` gave no document for errors before the search starts; repo
+  locations, error messages and JSON could still send the terminal control
+  characters; a line's JSON matches could repeat; `r.git.git` URLs added a
+  GitHub repo twice; any folder with a `registry.json` was taken for a
+  workspace; and `.DS_Store` in `indexes/` blocked a first `add`.
 - The first version of the parallel search had a race: a task signaled the
   condition variable after letting go of the lock, so the search could be
   destroyed first. The differential test hung on it now and then. Tasks now

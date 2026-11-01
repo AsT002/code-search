@@ -1,9 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
 namespace codesearch {
+
+// How many bytes the valid UTF-8 character starting at text[at] has (1 to
+// 4), or 0 if no valid character starts there. `at` must be inside `text`.
+std::size_t utf8Length(std::string_view text, std::size_t at);
 
 // True if `text` is valid UTF-8: every character is 1 to 4 bytes in the
 // shortest form, with no UTF-16 surrogates (U+D800 to U+DFFF) and nothing

@@ -39,4 +39,8 @@ void moveIntoIndexes(const Workspace& workspace, const std::filesystem::path& tm
 // itself, never what it points to.
 void cleanUp(const Workspace& workspace, const Registry& registry);
 
+// True if indexes/ or repos/ hold an index file or clone code-search made.
+// Other files there (like .DS_Store) don't count; cleanup never deletes them.
+bool holdsIndexesOrClones(const Workspace& workspace);
+
 }  // namespace codesearch

@@ -158,6 +158,22 @@ TEST(ResultLines, AMatchStartingInALineEndingIsShownOnTheNextLine) {
     EXPECT_EQ(linesFor("a\rb", "\rb", 0), (std::vector<ResultLine>{hit(1, "a\rb", {{1, 3}})}));
 }
 
+// Spans that become the same after a match is moved or cut show once, in
+// order of start, then end.
+TEST(ResultLines, SpansAreSortedAndUniqueAfterMovingAndCutting) {
+    const auto lines = [](std::string_view content, const QueryNode& query) {
+        const Evaluator evaluator(query, {});
+        const std::vector<Match> matches = locate(content, evaluator.collectSpans("", content));
+        return resultLines(content, matches, 0, 100);
+    };
+    EXPECT_EQ(lines("x\nfoo\n", anyOf({literal("\nfoo"), literal("foo")})),
+              (std::vector<ResultLine>{hit(2, "foo", {{0, 3}})}));
+    EXPECT_EQ(lines("x\nfoo\n", anyOf({literal("\nfoo"), literal("fo")})),
+              (std::vector<ResultLine>{hit(2, "foo", {{0, 2}, {0, 3}})}));
+    EXPECT_EQ(lines("x\nfoo\n", anyOf({literal("x\n"), literal("x")})),
+              (std::vector<ResultLine>{hit(1, "x", {{0, 1}})}));
+}
+
 TEST(ResultLines, MatchesAreCutAtTheEndOfTheLine) {
     // The match runs into the next line and over the CR, which isn't shown.
     EXPECT_EQ(linesFor("ab\r\ncd", "b\r\nc", 0), (std::vector<ResultLine>{hit(1, "ab", {{1, 2}})}));

@@ -120,6 +120,11 @@ std::vector<Span> matchesOnLine(std::span<const Match> matches, std::size_t& nex
         const std::size_t end = std::min(bytes.end, textEnd) - lineStart;
         spans.push_back(Span{begin, end});
     }
+    // Cutting at the line end, or a match moved past a line ending, can
+    // make two spans the same, or put a longer one before a shorter one that
+    // starts at the same byte. Keep them sorted, once each.
+    std::sort(spans.begin(), spans.end());
+    spans.erase(std::unique(spans.begin(), spans.end()), spans.end());
     return spans;
 }
 

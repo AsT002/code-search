@@ -147,11 +147,35 @@ TEST(CliErrors, NotARepo) {
     EXPECT_TRUE(contains(result.err, "not a Git repository")) << result.err;
 }
 
+// A repo with nothing to search is an error (2), not "nothing found" (1).
 TEST(CliErrors, EmptyRepo) {
     const TempRepo repo;
     const ProcessResult result = searchIn(repo, {"x"});
-    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "no commits")) << result.err;
+}
+
+// With --json, errors before the search starts still give one whole
+// document, saying what's wrong.
+TEST(CliErrors, EarlyErrorsAreJsonToo) {
+    const TempRepo empty;
+    ProcessResult result = searchIn(empty, {"--json", "x"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_EQ(
+        result.out,
+        "{\"files\":[],\"status\":\"error\",\"error\":\"the repository has no commits yet\"}\n");
+
+    TempRepo repo;
+    fillRepo(repo);
+    result = searchIn(repo, {"--json", "(unbalanced"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(result.out.starts_with("{\"files\":[],\"status\":\"error\",\"error\":\"a ( is"))
+        << result.out;
+
+    const TempDir home;
+    result = codeSearch({"search", "--json", "x"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.out, "\"error\":\"no repos added yet")) << result.out;
 }
 
 TEST(CliErrors, UnreadableHeadCommitIsAnError) {
@@ -339,6 +363,14 @@ TEST(CliQuery, ControlBytesAreShownNotSentToTheTerminal) {
               "\033[35mbell\\x07.txt\033[0m\033[36m:\033[0m\033[32m1\033[0m\033[36m:\033[0m"
               "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mevil\033[0m \\x1b]0;title\\x07 here\n");
     EXPECT_EQ(searchIn(repo, {"evil"}).out, "bell\x07.txt:1:1:evil \x1b]0;title\x07 here\n");
+
+    // A match that ends inside a character: the whole character is
+    // highlighted, and shown as it is, not escaped in halves.
+    repo.write("cafe.txt", "caf\xc3\xa9 hello\n");
+    repo.commit();
+    EXPECT_EQ(searchIn(repo, {"--color=always", "caf\xc3"}).out,
+              "\033[35mcafe.txt\033[0m\033[36m:\033[0m\033[32m1\033[0m\033[36m:\033[0m"
+              "\033[32m1\033[0m\033[36m:\033[0m\033[1;31mcaf\xc3\xa9\033[0m hello\n");
 }
 
 // ---- Added repos ----
@@ -579,6 +611,20 @@ TEST(CliRepos, DamageFoundWhileSearchingNamesTheFix) {
     EXPECT_TRUE(contains(result.err, "demo: index file is damaged")) << result.err;
     EXPECT_TRUE(contains(result.err, "code-search update demo --rebuild")) << result.err;
 
+    // Damage found while opening the index, before the search: JSON too.
+    {
+        std::string header = testing::readFile(file);
+        const std::string saved = header;
+        header[0] = 'X';  // the first byte of the magic number
+        testing::writeFile(file, header);
+        const ProcessResult opened = codeSearch({"search", "--json", "target"}, home.dir());
+        EXPECT_EQ(opened.exitCode, 2);
+        EXPECT_TRUE(opened.out.starts_with(
+            "{\"files\":[],\"status\":\"error\",\"error\":\"demo: not an index file"))
+            << opened.out;
+        testing::writeFile(file, saved);
+    }
+
     // With --json, the output is still one whole document, saying why it ended.
     result = codeSearch({"search", "--json", "target"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
@@ -676,6 +722,50 @@ TEST(CliErrors, Version) {
     const ProcessResult result = codeSearch({"--version"});
     EXPECT_EQ(result.exitCode, 0);
     EXPECT_TRUE(result.out.starts_with("code-search ")) << result.out;
+}
+
+// Runs code-search with its output on a terminal (a pty), using macOS's
+// `script`. stdout and stderr both go to that terminal.
+ProcessResult onATerminal(const std::vector<std::string>& args, const std::filesystem::path& home) {
+    std::vector<std::string> command = {
+        "-q", "/dev/null", "env", "CODE_SEARCH_HOME=" + home.string(), CODE_SEARCH_BIN,
+    };
+    command.insert(command.end(), args.begin(), args.end());
+    return runProcess("script", command);
+}
+
+// A folder name, or a message about it, can't send the terminal escape
+// sequences either: on a terminal, they show as \xHH.
+TEST(CliRepos, FolderNamesAreShownNotSentToTheTerminal) {
+#ifndef __APPLE__
+    GTEST_SKIP() << "uses macOS's script to get a terminal";
+#else
+    const TempDir dir;
+    const std::filesystem::path repo = dir.dir() / "ev\x1b]0;PWNED\x07il";
+    std::filesystem::create_directories(repo);
+    const std::string git = repo.string();
+    ASSERT_EQ(runProcess("git", {"-C", git, "init", "-q"}).exitCode, 0);
+    testing::writeFile(repo / "a.txt", "hello\n");
+    ASSERT_EQ(runProcess("git", {"-C", git, "add", "a.txt"}).exitCode, 0);
+    ASSERT_EQ(runProcess("git", {"-C", git, "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                                 "-q", "-m", "x"})
+                  .exitCode,
+              0);
+    const TempDir home;
+    for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
+             {"add", git, "--name", "evil"},
+             {"list"},
+             {"add", git, "--name", "again"},  // the "already added" error, on stderr
+             {"remove", "evil"},
+         }) {
+        SCOPED_TRACE(::testing::PrintToString(args));
+        const ProcessResult result = onATerminal(args, home.dir());
+        EXPECT_FALSE(contains(result.out, "\x1b]0;")) << result.out;
+        EXPECT_TRUE(contains(result.out, "ev\\x1b]0;PWNED\\x07il")) << result.out;
+    }
+    // Into a pipe, the bytes stay as they are.
+    EXPECT_TRUE(contains(codeSearch({"add", git, "--name", "evil"}, home.dir()).out, "ev\x1b]0;"));
+#endif
 }
 
 }  // namespace

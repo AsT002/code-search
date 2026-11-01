@@ -34,6 +34,21 @@ bool validName(std::string_view name) {
     return true;
 }
 
+// True if `name` ends with ".git", in any case.
+bool endsWithDotGit(std::string_view name) {
+    constexpr std::string_view kDotGit = ".git";
+    if (name.size() < kDotGit.size()) {
+        return false;
+    }
+    const std::string_view end = name.substr(name.size() - kDotGit.size());
+    for (std::size_t i = 0; i < kDotGit.size(); ++i) {
+        if (foldAscii(end[i]) != kDotGit[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::optional<GitHubRepo> parseGitHubUrl(std::string_view text) {
@@ -47,10 +62,13 @@ std::optional<GitHubRepo> parseGitHubUrl(std::string_view text) {
     }
     const std::string_view owner = text.substr(0, slash);
     std::string_view name = text.substr(slash + 1);
-    if (name.ends_with(".git")) {
+    if (endsWithDotGit(name)) {
         name.remove_suffix(4);
     }
-    if (!validOwner(owner) || !validName(name)) {
+    // GitHub never keeps ".git" at the end of a repo's name, so r.git.git
+    // could only be another way to write r: refuse it, or the same repo
+    // could be added twice.
+    if (!validOwner(owner) || !validName(name) || endsWithDotGit(name)) {
         return std::nullopt;  // this also rejects a second '/', since names can't hold one
     }
     return GitHubRepo{.owner = std::string(owner), .name = std::string(name)};

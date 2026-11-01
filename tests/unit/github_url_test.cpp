@@ -10,8 +10,11 @@ namespace codesearch {
 namespace {
 
 TEST(GitHubUrl, AcceptsOwnerAndName) {
-    for (const std::string url :
-         {"https://github.com/example/frontend", "https://github.com/example/frontend.git"}) {
+    for (const std::string url : {
+             "https://github.com/example/frontend",
+             "https://github.com/example/frontend.git",
+             "https://github.com/example/frontend.GIT",
+         }) {
         const std::optional<GitHubRepo> repo = parseGitHubUrl(url);
         ASSERT_TRUE(repo.has_value()) << url;
         EXPECT_EQ(repo->owner, "example");
@@ -41,6 +44,8 @@ TEST(GitHubUrl, RejectsEverythingElse) {
         "https://github.com/a/b?x=1",
         "https://github.com/a/b#x",
         "https://github.com/a/.git",
+        "https://github.com/a/b.git.git",  // only another way to write a/b
+        "https://github.com/a/b.git.GIT",
         "https://github.com/a/..",
         "https://github.com/a/.",
         "https://github.com/-a/b",

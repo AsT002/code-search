@@ -66,6 +66,10 @@ std::size_t validLength(std::string_view text, std::size_t i) {
 
 }  // namespace
 
+std::size_t utf8Length(std::string_view text, std::size_t at) {
+    return validLength(text, at);
+}
+
 bool isValidUtf8(std::string_view text) {
     std::size_t i = 0;
     while (i < text.size()) {

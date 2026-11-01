@@ -242,8 +242,8 @@ would delete every index file and clone the registry doesn't list.
 - Files and folders are named by internal IDs like `r_7f3a90b1` (8 random hex
   digits). The name a user gives
   with `--name` is only a label in the registry and never becomes a path.
-- Local repos stay where they are. `remove` deletes the registry entry and index
-  files, never the user's code.
+- Local repos stay where they are. `remove` deletes the registry entry, the
+  index files and, for a GitHub repo, our clone; never the user's code.
 - Clones we own have no checked-out files. We read from Git's object store, so
   a checkout would only waste disk.
 - Repo names may use letters, digits, `.`, `_` and `-`, and can't start with `.`
@@ -412,7 +412,9 @@ only deletes names code-search makes (`r_7f3a90b1-g0001.idx`, its
 anything else alone. It only deletes entries directly inside the folders, checks that after following
 symlinks, and deletes a symlink itself, never what it points to. It also
 deletes `registry.json.tmp-*` files, which a registry save killed partway
-leaves next to `registry.json`.
+leaves next to `registry.json`, and `code-search-workspace.tmp-*` files, which
+an earlier version left the same way when writing the marker. If it can't
+delete something, the error names it and suggests checking its permissions.
 
 Since `remove` can't run during a build, a build can't finish after a `remove` and
 bring the repo back.
@@ -421,7 +423,9 @@ Searches open the file the registry names. If cleanup deleted it in the meantime
 they read the registry again and retry once. A file that's already open stays
 readable after it's deleted, because POSIX keeps it alive until it's closed.
 
-At startup we clean `tmp/` and unused index files, also while holding the lock.
+There's no cleanup when the program starts: `add`, `update` and `remove` clean
+up at their start and end, while holding the lock. Searches and `list` never
+delete anything.
 
 One lock means only one build runs at a time, even for different repos. That's
 fine to start with. If it becomes a problem, we'll switch to a lock per repo plus
@@ -511,6 +515,11 @@ U+009F, and bytes that aren't valid UTF-8. So a file can't change the title
 or clear the screen through an escape sequence. Into a pipe or a file
 without colors, the bytes are written as they are.
 
+Repo locations and error messages are escaped the same way when they go to
+a terminal. JSON is always written with DEL and the C1 controls as `\u`
+escapes, which JSON reads as the same text. A highlight that starts or ends
+inside a character covers the whole character.
+
 If the output closes early, like `| head`, the search stops at the next
 file and exits with 2.
 
@@ -526,12 +535,14 @@ result never has to sit in memory:
 ```
 
 - `status` is `complete`, `truncated` (a limit cut it), `cancelled`, or
-  `error`. With `error`, an `error` field holds the message, like a damaged
+  `error`. Errors before the search starts, like a bad query or a damaged
+  index file, give a document with no files and `status` `error`. With `error`, an `error` field holds the message, like a damaged
   index, and the files before it are still there. The program also prints
   the message to stderr and exits with 2. (`error` was added after M6.)
 - `lines` holds matching lines and context lines; context lines have no
   matches. It's empty with `-l` and for files with nothing to highlight.
-- `start` and `end` are byte offsets inside the line's original bytes.
+- `start` and `end` are byte offsets inside the line's original bytes. A
+  line's matches are in order of `start`, then `end`, each only once.
 - JSON text must be valid UTF-8. If a path or line isn't, its bad bytes become
   U+FFFD, and `path_base64` or `text_base64` holds the exact bytes.
 
@@ -769,7 +780,7 @@ code-search/
 │   ├── cli/                    runs the real `code-search` program
 │   ├── differential/           index search vs brute force
 │   ├── integration/            Git to search, start to finish
-│   ├── fuzz/                   index reader, query parser
+│   ├── fuzz/                   index reader (the parser's random tests are in unit/)
 │   └── support/                brute-force search, temp Git repos, a fake `git` for broken output
 ├── benchmarks/                 search_bench, run_benchmarks.py, repos.tsv, queries.tsv,
 │                               index_bench, storage_experiment (M2.5)

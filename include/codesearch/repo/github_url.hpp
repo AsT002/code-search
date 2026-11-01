@@ -14,8 +14,10 @@ struct GitHubRepo {
     std::string url() const { return "https://github.com/" + owner + "/" + name; }
 };
 
-// Accepts only https://github.com/<owner>/<name>, with or without ".git" at
-// the end. Owners use letters, digits and '-'. Names use letters, digits,
+// Accepts only https://github.com/<owner>/<name>, with or without ".git" (in
+// any case) at the end. A name that still ends in ".git" after that is
+// refused: GitHub never keeps it, so it would be another way to write a repo. Owners use letters,
+// digits and '-'. Names use letters, digits,
 // '.', '_' and '-'. Anything else returns nothing: no other hosts, schemes,
 // ports, users, query strings or extra path parts. Git reads options and
 // special URL schemes from its arguments, so we pass it only URLs we know.

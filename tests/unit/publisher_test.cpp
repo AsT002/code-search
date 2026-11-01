@@ -181,6 +181,18 @@ TEST(Workspace, RefusesAFolderThatHoldsOtherFiles) {
     EXPECT_THROW(Workspace(dir.file("file")).create(), std::runtime_error);
 }
 
+// Another program's registry.json doesn't make a folder ours, and nothing
+// may be added to it.
+TEST(Workspace, SomeoneElsesRegistryJsonIsntOurs) {
+    const TempDir dir;
+    const Workspace folder(dir.file("project"));
+    std::filesystem::create_directories(folder.root());
+    writeFile(folder.registryFile(), R"({"name":"my thing"})");
+    writeFile(folder.root() / "notes.txt", "mine");
+    EXPECT_THROW(folder.create(), std::runtime_error);
+    EXPECT_EQ(namesIn(folder.root()), (std::set<std::string>{"notes.txt", "registry.json"}));
+}
+
 TEST(Workspace, TakesANewOrEmptyFolderOrAnOldWorkspace) {
     const TempDir dir;
     const Workspace fresh(dir.file("new"));
@@ -195,7 +207,7 @@ TEST(Workspace, TakesANewOrEmptyFolderOrAnOldWorkspace) {
     // Made before the marker existed: registry.json says it's ours.
     const Workspace old(dir.file("old"));
     std::filesystem::create_directories(old.indexesDir());
-    writeFile(old.registryFile(), "{}");
+    writeFile(old.registryFile(), registryToJson(Registry{}));
     old.create();
     EXPECT_TRUE(std::filesystem::exists(old.markerFile()));
 }
@@ -241,6 +253,31 @@ TEST(Workspace, NoMarkerMeansNoFolders) {
     workspace.create();  // works once files are allowed again
     EXPECT_TRUE(std::filesystem::exists(workspace.markerFile()));
 #endif
+}
+
+// Something cleanup can't delete gives an error that says what and why.
+TEST(Publisher, CleanUpSaysWhatItCouldntDelete) {
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "root can delete anything";
+    }
+    const TempDir dir;
+    const Workspace workspace(dir.file("ws"));
+    workspace.create();
+    const std::filesystem::path locked = workspace.cloneDir("r_00000001") / "objects";
+    std::filesystem::create_directories(locked);
+    writeFile(locked / "pack", "x");
+    std::filesystem::permissions(
+        locked, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+    try {
+        cleanUp(workspace, Registry{});
+        ADD_FAILURE() << "expected an error";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("could not delete"), std::string::npos) << message;
+        EXPECT_NE(message.find("r_00000001.git"), std::string::npos) << message;
+        EXPECT_NE(message.find("Check its permissions"), std::string::npos) << message;
+    }
+    std::filesystem::permissions(locked, std::filesystem::perms::owner_all);
 }
 
 TEST(Publisher, CleanUpWithoutFoldersDoesNothing) {

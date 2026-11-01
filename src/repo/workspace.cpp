@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "codesearch/repo/registry.hpp"
+
 namespace codesearch {
 
 namespace {
@@ -69,9 +71,18 @@ void Workspace::checkRoot() const {
     if (!std::filesystem::is_directory(root_)) {
         throw std::runtime_error(root_.string() + " isn't a folder");
     }
-    // registry.json: a workspace made before the marker file existed.
-    if (std::filesystem::exists(markerFile()) || std::filesystem::exists(registryFile())) {
+    if (std::filesystem::exists(markerFile())) {
         return;
+    }
+    // A registry.json of ours: a workspace made before the marker file
+    // existed. Another program's registry.json doesn't count; it would
+    // otherwise get our folders made next to it.
+    if (std::filesystem::exists(registryFile())) {
+        try {
+            JsonRegistryStore(registryFile()).load();
+            return;
+        } catch (const RegistryError&) {  // NOLINT(bugprone-empty-catch) not ours; see below
+        }
     }
     // Empty, apart from what an earlier version left if it was killed while
     // writing the marker with AtomicFile: "code-search-workspace.tmp-XXXXXX".

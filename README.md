@@ -61,7 +61,13 @@ Put the query in quotes, so the shell passes it as one argument:
 ./build/debug/code-search search 'case:yes Foo'
 ./build/debug/code-search search -C 2 --max-results 20 TODO    # context, limit (0: none)
 ./build/debug/code-search search --json authenticate
+./build/debug/code-search search --color=always TODO | less -R  # colors into a pager
 ```
+
+Colors are on for a terminal and off for a pipe, as with grep; `--color=always`
+or `--color=never` decides, and `NO_COLOR` turns them off. On a terminal, bytes
+from files that could control it, like escape sequences, are shown as `\xHH`.
+With `--json` the output is always one JSON document, even after an error.
 
 | Query | Meaning |
 |-------|---------|
@@ -86,7 +92,7 @@ can't be read at all.
 `add` indexes the repo's last commit, not uncommitted changes. New commits show
 up after `update`. For a GitHub repo, `update` fetches the latest commit of its
 default branch first. If nothing changed, it does nothing. Changing a single
-file still rebuilds the whole index, which takes about 2 seconds for
+file still rebuilds the whole index, which takes under a second for
 golang/go. If a search or `verify` finds a damaged index, it tells you to run
 `update <name> --rebuild`.
 GitHub repos are cloned without a working copy into code-search's own folder.

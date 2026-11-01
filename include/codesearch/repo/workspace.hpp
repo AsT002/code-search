@@ -42,7 +42,7 @@ public:
     void create() const;
 
     // Throws std::runtime_error unless the root is missing, empty, or already
-    // a workspace (it has the marker file or registry.json). Cleanup deletes
+    // a workspace (it has the marker file, or a registry.json of ours). Cleanup deletes
     // files in the workspace, so code-search must never move into a folder
     // that holds someone else's files, like ~ itself.
     void checkRoot() const;

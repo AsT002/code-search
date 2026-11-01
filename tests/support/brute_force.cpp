@@ -199,6 +199,20 @@ BruteLine lineOf(std::string_view text, const Match& match) {
     return BruteLine{.number = match.line, .matches = {Span{begin, end}}};
 }
 
+// A line's spans in order of start, then end, each once.
+std::vector<Span> inOrderOnce(const std::vector<Span>& spans) {
+    std::vector<Span> unique;
+    for (const Span span : spans) {
+        if (std::find(unique.begin(), unique.end(), span) == unique.end()) {
+            unique.push_back(span);
+        }
+    }
+    std::sort(unique.begin(), unique.end(), [](Span a, Span b) {
+        return a.begin != b.begin ? a.begin < b.begin : a.end < b.end;
+    });
+    return unique;
+}
+
 }  // namespace
 
 SearchResults bruteForceSearch(const std::vector<TestFile>& files, const QueryNode& query,
@@ -246,6 +260,9 @@ std::vector<BruteFile> bruteForceRepoSearch(const std::vector<TestRepo>& repos,
                 } else {
                     found.lines.push_back(std::move(line));
                 }
+            }
+            for (BruteLine& line : found.lines) {
+                line.matches = inOrderOnce(line.matches);
             }
             results.push_back(std::move(found));
         }

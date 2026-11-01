@@ -306,7 +306,9 @@ Registry JsonRegistryStore::load() const {
     try {
         return registryFromJson(text.str());
     } catch (const RegistryError& error) {
-        throw RegistryError(path_.string() + " is damaged: " + error.what());
+        throw RegistryError(path_.string() + " is damaged: " + error.what() +
+                            ". Put back a copy that works, or remove the folder " +
+                            path_.parent_path().string() + " to start over");
     }
 }
 

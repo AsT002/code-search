@@ -4,6 +4,7 @@
 #include <atomic>
 #include <charconv>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -217,13 +218,11 @@ struct BuiltRepo {
 // Indexes the repo's HEAD in memory and prints what was indexed. Returns
 // nothing, after saying why, if the repo has no commits.
 // `pool` can be nullptr, to build on this thread.
-std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& filter,
-                                   ThreadPool* pool) {
+BuiltRepo buildRepo(const std::string& path, const FileFilter& filter, ThreadPool* pool) {
     const GitRepo repo(path);
     const std::optional<ObjectId> commit = repo.resolveHead();
     if (!commit.has_value()) {
-        std::cerr << "code-search: the repository has no commits yet\n";
-        return std::nullopt;
+        throw std::runtime_error("the repository has no commits yet");
     }
     BuiltRepo result{
         .commit = commit.value(),
@@ -264,17 +263,63 @@ Colors pickColors(Color color) {
     };
 }
 
+// `text` for printing to `fd` (stdout or stderr): if that's a terminal,
+// escaped line by line, so a folder name or a message from Git can't
+// control the terminal. Its line breaks stay.
+std::string forTerminal(std::string_view text, int fd) {
+    if (::isatty(fd) != 1) {
+        return std::string(text);
+    }
+    std::string out;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t newline = text.find('\n', start);
+        out += escapeForTerminal(text.substr(start, newline - start));
+        if (newline == std::string_view::npos) {
+            return out;
+        }
+        out += '\n';
+        start = newline + 1;
+    }
+}
+
 // `text` as it should be printed: escaped if `escape`, so a file's bytes
 // can't control the terminal (see escapeForTerminal).
 std::string shown(std::string_view text, bool escape) {
     return escape ? escapeForTerminal(text) : std::string(text);
 }
 
+// Where each character of `text` starts: starts[i] is true if one starts at
+// byte i, and starts[text.size()] is true. A byte that isn't part of a valid
+// UTF-8 character counts as a character of its own.
+std::vector<bool> characterStarts(std::string_view text) {
+    std::vector<bool> starts(text.size() + 1, false);
+    std::size_t i = 0;
+    while (i < text.size()) {
+        starts[i] = true;
+        i += std::max<std::size_t>(utf8Length(text, i), 1);
+    }
+    starts[text.size()] = true;
+    return starts;
+}
+
 // Prints a line's text with its matches colored. Each piece is escaped on
-// its own, so the highlights stay where they were.
+// its own, so the highlights stay where they were. When escaping, a
+// highlight that starts or ends inside a character is widened to all of
+// it: half a character would be invalid UTF-8, and shown escaped.
 void printHighlighted(const ResultLine& line, const Colors& colors, bool escape) {
+    const std::vector<bool> starts = escape ? characterStarts(line.text) : std::vector<bool>{};
     std::size_t done = 0;
-    for (const Span& span : line.matches) {
+    for (const Span& match : line.matches) {
+        Span span = match;
+        if (escape) {
+            while (!starts[span.begin]) {
+                --span.begin;
+            }
+            while (!starts[span.end]) {
+                ++span.end;
+            }
+        }
         // Matches can overlap ("ab or bc" in "abc"). Color only the part of
         // this one that isn't colored yet.
         const std::size_t begin = std::max(span.begin, done);
@@ -352,12 +397,23 @@ extern "C" void onInterrupt(int /*signal*/) {
 // Runs the search and prints the results, as text or JSON. Sets `found` if
 // there was any. If the search fails partway, JSON output is still ended as
 // one whole document, saying why.
+// While one of these lives, Ctrl-C sets gCancelled instead of ending the
+// program. The default comes back however the search ends, by an error too.
+class InterruptHandler {
+public:
+    InterruptHandler() { static_cast<void>(std::signal(SIGINT, onInterrupt)); }
+    ~InterruptHandler() { static_cast<void>(std::signal(SIGINT, SIG_DFL)); }
+
+    InterruptHandler(const InterruptHandler&) = delete;
+    InterruptHandler& operator=(const InterruptHandler&) = delete;
+    InterruptHandler(InterruptHandler&&) = delete;
+    InterruptHandler& operator=(InterruptHandler&&) = delete;
+};
+
+// Runs the search and prints the results, as text or into `json`. Sets
+// `found` if there was any.
 SearchStatus printResults(std::span<const SearchTarget> targets, const SearchRequest& request,
-                          const SearchArgs& args, bool& found) {
-    std::optional<JsonResultWriter> json;
-    if (args.json) {
-        json.emplace(std::cout);
-    }
+                          const SearchArgs& args, JsonResultWriter* json, bool& found) {
     // On a terminal, a file's bytes could send it commands (like ESC
     // sequences), so they're escaped. Colors mean a terminal too, maybe
     // behind a pager like `less -R`. Into a pipe or file, bytes stay as
@@ -366,12 +422,12 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
     const bool escape = ::isatty(STDOUT_FILENO) == 1 || !colors.reset.empty();
     TextPrinter text(args.contextLines, colors, escape);
 
-    static_cast<void>(std::signal(SIGINT, onInterrupt));
     SearchStatus status = SearchStatus::Complete;
-    try {
+    {
+        const InterruptHandler interrupts;
         status = searchRepos(targets, request, [&](const ResultFile& file) {
             found = true;
-            if (json.has_value()) {
+            if (json != nullptr) {
                 json->file(file);
             } else {
                 text.file(file);
@@ -382,21 +438,8 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
                 throw std::runtime_error("could not write the output");
             }
         });
-    } catch (const RepoIndexError& error) {
-        const std::string message = error.what() + rebuildHint(error.repo());
-        if (json.has_value()) {
-            json->fail(message);  // so what's printed so far is still whole JSON
-        }
-        throw IndexFileError(message);
-    } catch (const std::exception& error) {
-        if (json.has_value()) {
-            json->fail(error.what());
-        }
-        throw;
     }
-    static_cast<void>(std::signal(SIGINT, SIG_DFL));
-
-    if (json.has_value()) {
+    if (json != nullptr) {
         json->finish(status);
     } else if (status == SearchStatus::Truncated) {
         std::cerr << "code-search: stopped after " << args.maxResults
@@ -405,7 +448,9 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
     return status;
 }
 
-int runSearch(const SearchArgs& args) {
+// The search command, once its arguments are read. With --json, everything
+// goes into `json`; runSearch ends the document if this throws.
+int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
     const ParsedQuery parsed = parseQuery(args.query);
     SearchRequest request{
         .query = parsed.root,
@@ -428,16 +473,11 @@ int runSearch(const SearchArgs& args) {
             throw QueryError("repo: only works on added repos, not with --path");
         }
         built = buildRepo(args.repoPath, FileFilter(), pool.get());
-        if (!built.has_value()) {
-            return 1;
-        }
         targets.push_back({.name = "", .index = &built->built.index});
     } else {
         const Workspace workspace(Workspace::defaultRoot());
         if (loadRegistry(workspace).repos.empty()) {
-            std::cerr
-                << "code-search: no repos added yet. Add one with: code-search add <folder>\n";
-            return 2;
+            throw std::runtime_error("no repos added yet. Add one with: code-search add <folder>");
         }
         if (!args.repoName.empty()) {
             request.query = allOf({repoFilter(args.repoName), request.query});
@@ -449,12 +489,42 @@ int runSearch(const SearchArgs& args) {
     }
 
     bool found = false;
-    const SearchStatus status = printResults(targets, request, args, found);
+    const SearchStatus status = printResults(targets, request, args, json, found);
     if (status == SearchStatus::Cancelled) {
         std::cerr << "code-search: cancelled\n";
         return 130;  // what shells use for "stopped by Ctrl-C"
     }
     return found ? 0 : 1;  // like grep: 1 means nothing found
+}
+
+// With --json, the output is one whole JSON document whatever happens:
+// an error at any point, even before the search starts (a bad query, a
+// damaged index), ends it with "status":"error" and the message.
+int runSearch(const SearchArgs& args) {
+    std::optional<JsonResultWriter> json;
+    if (args.json) {
+        json.emplace(std::cout);
+    }
+    JsonResultWriter* writer = json.has_value() ? &json.value() : nullptr;
+    try {
+        return searchAndPrint(args, writer);
+    } catch (const RepoIndexError& error) {
+        const std::string message = error.what() + rebuildHint(error.repo());
+        if (writer != nullptr) {
+            writer->fail(message);
+        }
+        throw IndexFileError(message);
+    } catch (const std::exception& error) {
+        if (writer != nullptr) {
+            writer->fail(error.what());
+        }
+        throw;
+    } catch (...) {
+        if (writer != nullptr) {
+            writer->fail("unknown error");
+        }
+        throw;
+    }
 }
 
 RepoManager makeManager() {
@@ -472,7 +542,8 @@ std::string_view sourceName(RepoSource source) {
 int runAdd(const AddArgs& args) {
     const AddResult result = makeManager().add(args.source, args.name);
     printReport(result.repo.index.commit, result.report);
-    std::cout << "added " << result.repo.name << " (" << result.repo.location << ")\n";
+    std::cout << "added " << result.repo.name << " ("
+              << forTerminal(result.repo.location, STDOUT_FILENO) << ")\n";
     return 0;
 }
 
@@ -490,8 +561,8 @@ int runList() {
     for (const RepoEntry& repo : registry.repos) {
         std::cout << repo.name << std::string(width - repo.name.size() + 2, ' ')
                   << sourceName(repo.source) << (repo.source == RepoSource::Local ? "   " : "  ")
-                  << repo.index.commit.hex().substr(0, kShortCommit) << "  " << repo.location
-                  << '\n';
+                  << repo.index.commit.hex().substr(0, kShortCommit) << "  "
+                  << forTerminal(repo.location, STDOUT_FILENO) << '\n';
     }
     return 0;
 }
@@ -504,7 +575,8 @@ int runUpdate(const std::string& name, bool rebuild) {
         return 0;
     }
     printReport(result.repo.index.commit, result.report);
-    std::cout << "updated " << result.repo.name << " (" << result.reason << ")\n";
+    std::cout << "updated " << result.repo.name << " (" << forTerminal(result.reason, STDOUT_FILENO)
+              << ")\n";
     return 0;
 }
 
@@ -512,7 +584,8 @@ int runRemove(const std::string& name) {
     const RepoEntry removed = makeManager().remove(name);
     std::cout << "removed " << removed.name;
     if (removed.source == RepoSource::Local) {
-        std::cout << " (" << removed.location << " itself was not touched)";
+        std::cout << " (" << forTerminal(removed.location, STDOUT_FILENO)
+                  << " itself was not touched)";
     }
     std::cout << '\n';
     return 0;
@@ -586,6 +659,19 @@ int run(std::span<char*> args) {
     return 2;
 }
 
+// Prints an error message, escaped if stderr is a terminal. If even that
+// fails (out of memory), prints it as it is: main must not throw.
+void printError(const char* message) noexcept {
+    try {
+        std::cerr << "code-search: " << forTerminal(message, STDERR_FILENO) << '\n';
+    } catch (...) {
+        // Nothing more to do if these fail too.
+        static_cast<void>(std::fputs("code-search: ", stderr));
+        static_cast<void>(std::fputs(message, stderr));
+        static_cast<void>(std::fputs("\n", stderr));
+    }
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -605,7 +691,7 @@ int main(int argc, char* argv[]) {
         }
         return exitCode;
     } catch (const std::exception& error) {
-        std::cerr << "code-search: " << error.what() << '\n';
+        printError(error.what());
     } catch (...) {
         std::cerr << "code-search: unknown error\n";
     }
