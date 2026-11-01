@@ -1,9 +1,18 @@
 #include "codesearch/search/json_output.hpp"
 
+#include "../support/allocations.hpp"
+#include "codesearch/util/utf8.hpp"
+
 #include <gtest/gtest.h>
 
+#include <array>
+#include <new>
+#include <nlohmann/json.hpp>
+#include <random>
 #include <sstream>
+#include <streambuf>
 #include <string>
+#include <thread>
 
 namespace codesearch {
 namespace {
@@ -107,6 +116,72 @@ TEST(Json, TerminalControlsAreEscaped) {
     const std::string json = resultFileJson(file);
     // U+00A0 (C2 A0) is past the C1 range, so it stays as it is.
     EXPECT_NE(json.find("\"text\":\"x\\u007f \\u009b31m \xc2\xa0\""), std::string::npos) << json;
+}
+
+// A stream into a fixed buffer, so writing to it never allocates.
+class FixedBuffer : public std::streambuf {
+public:
+    FixedBuffer() { setp(buffer_.data(), buffer_.data() + buffer_.size()); }
+    std::string text() const { return {pbase(), pptr()}; }
+
+private:
+    std::array<char, std::size_t{1} << 16U> buffer_{};
+};
+
+// If making a file's JSON fails (memory runs out), fail() must still end
+// the document as valid JSON: no comma before a file that never came.
+TEST(JsonResultWriter, AFileThatFailsLeavesValidJson) {
+    const ResultFile first{.repo = "r", .path = "a.txt", .lines = {}};
+    const ResultFile second{
+        .repo = "r",
+        .path = "b.txt",
+        .lines = {ResultLine{.number = 1, .text = "some text", .matches = {{0, 4}}}},
+    };
+    gMainThread = std::this_thread::get_id();
+    for (long failAt = 1; failAt <= 60; ++failAt) {
+        SCOPED_TRACE(failAt);
+        FixedBuffer buffer;
+        std::ostream out(&buffer);
+        JsonResultWriter writer(out);
+        writer.file(first);
+        // Only allocations on another thread fail, so do it on one.
+        std::thread([&] {
+            gFailIn = failAt;
+            try {
+                writer.file(second);
+            } catch (const std::bad_alloc&) {  // NOLINT(bugprone-empty-catch) what's tested
+            }
+            gFailIn = 0;
+        }).join();
+        writer.fail("out of memory");
+        EXPECT_TRUE(nlohmann::json::accept(buffer.text())) << buffer.text();
+    }
+}
+
+// The JSON is written by hand, so check it against a real JSON parser: any
+// bytes in a path or line must come back as the same text (with U+FFFD for
+// bytes that aren't valid UTF-8, whose exact bytes are in *_base64).
+TEST(Json, RandomTextReadsBack) {
+    // A fixed seed, so a failure comes back the same way.
+    std::mt19937 rng(11);  // NOLINT(cert-msc32-c,cert-msc51-cpp,bugprone-random-generator-seed)
+    std::uniform_int_distribution<int> byte(0, 255);
+    std::uniform_int_distribution<int> length(0, 12);
+    for (int round = 0; round < 3000; ++round) {
+        std::string text;
+        for (int n = length(rng); n > 0; --n) {
+            text.push_back(static_cast<char>(byte(rng)));
+        }
+        const ResultFile file{
+            .repo = "r",
+            .path = text,
+            .lines = {ResultLine{.number = 7, .text = text, .matches = {{0, 1}}}},
+        };
+        const nlohmann::json read = nlohmann::json::parse(resultFileJson(file));
+        ASSERT_EQ(read["path"], replaceInvalidUtf8(text)) << ::testing::PrintToString(text);
+        ASSERT_EQ(read["lines"][0]["text"], replaceInvalidUtf8(text));
+        ASSERT_EQ(read["lines"][0]["line"], 7);
+        ASSERT_EQ(read.contains("path_base64"), !isValidUtf8(text));
+    }
 }
 
 }  // namespace

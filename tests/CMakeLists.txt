@@ -7,6 +7,7 @@ add_executable(codesearch_tests
   fuzz/shard_reader_fuzz_test.cpp
   integration/index_commit_test.cpp
   integration/repo_manager_test.cpp
+  support/allocations.cpp
   support/brute_force.cpp
   support/fake_git.cpp
   support/temp_dir.cpp
@@ -39,7 +40,8 @@ add_executable(codesearch_tests
   unit/varint_test.cpp
   unit/version_test.cpp
 )
-target_link_libraries(codesearch_tests PRIVATE codesearch_core re2::re2 GTest::gtest_main)
+target_link_libraries(codesearch_tests PRIVATE codesearch_core re2::re2 nlohmann_json::nlohmann_json
+                                               GTest::gtest_main)
 target_compile_definitions(codesearch_tests PRIVATE
   EXPECTED_VERSION="${PROJECT_VERSION}"
   CODE_SEARCH_BIN="$<TARGET_FILE:code-search>"  # the CLI tests run the real program

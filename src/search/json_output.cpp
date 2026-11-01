@@ -1,6 +1,6 @@
 #include "codesearch/search/json_output.hpp"
 
-#include <nlohmann/json.hpp>
+#include <string>
 
 #include "codesearch/util/utf8.hpp"
 
@@ -8,36 +8,61 @@ namespace codesearch {
 
 namespace {
 
-// ordered_json keeps keys in the order we add them, so the output is stable.
-using Json = nlohmann::ordered_json;
-
-// `json` with DEL and the C1 controls (U+0080 to U+009F) written as \u
-// escapes. JSON allows them raw, and the library only escapes what's below
-// U+0020, but raw they can control a terminal the output is shown on. `json`
-// is valid UTF-8, so C2 80 to C2 9F are always those characters, and they
-// can only be inside strings.
-std::string escapeTerminalControls(const std::string& json) {
+void appendHexEscape(std::string& out, unsigned code) {
     constexpr std::string_view kDigits = "0123456789abcdef";
-    std::string out;
-    out.reserve(json.size());
-    for (std::size_t i = 0; i < json.size(); ++i) {
-        const auto byte = static_cast<unsigned char>(json[i]);
-        unsigned code = 0;
-        if (byte == 0x7F) {
-            code = 0x7F;
-        } else if (byte == 0xC2 && i + 1 < json.size() &&
-                   static_cast<unsigned char>(json[i + 1]) <= 0x9F) {
-            code = static_cast<unsigned char>(json[i + 1]);
-            ++i;
-        } else {
-            out += json[i];
-            continue;
+    out += "\\u00";
+    out += kDigits[code >> 4U];
+    out += kDigits[code & 0xFU];
+}
+
+// Appends `text`, which must be valid UTF-8, as a JSON string, quotes and
+// all. It escapes what JSON needs: '"', '\\' and characters below U+0020.
+// It also escapes DEL and the C1 controls (U+0080 to U+009F): JSON allows
+// them raw, but raw they can control a terminal the output is shown on.
+//
+// Written by hand instead of with nlohmann/json: its values can allocate
+// while being destroyed, where running out of memory can't be reported, and
+// a result must be safe to drop halfway (see JsonResultWriter::file).
+void appendString(std::string& out, std::string_view text) {
+    out += '"';
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        switch (c) {
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\b':
+                out += "\\b";
+                break;
+            case '\f':
+                out += "\\f";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                if (c < 0x20 || c == 0x7F) {
+                    appendHexEscape(out, c);
+                } else if (c == 0xC2 && i + 1 < text.size() &&
+                           static_cast<unsigned char>(text[i + 1]) <= 0x9F) {
+                    // C2 80 to C2 9F: valid UTF-8, so the C1 controls.
+                    appendHexEscape(out, static_cast<unsigned char>(text[i + 1]));
+                    ++i;
+                } else {
+                    out += static_cast<char>(c);
+                }
         }
-        out += "\\u00";
-        out += kDigits[code >> 4U];
-        out += kDigits[code & 0xFU];
     }
-    return out;
+    out += '"';
 }
 
 // Standard base64 (RFC 4648), with '=' padding.
@@ -66,14 +91,22 @@ std::string base64(std::string_view bytes) {
     return out;
 }
 
-// Adds `key` with `text`, plus `key`_base64 if `text` isn't valid UTF-8.
-void addText(Json& object, const std::string& key, std::string_view text) {
+// Appends "key":"text", plus "key_base64":"..." if `text` isn't valid
+// UTF-8. Then the text has U+FFFD for each bad byte.
+void appendText(std::string& out, std::string_view key, std::string_view text) {
+    out += '"';
+    out += key;
+    out += "\":";
     if (isValidUtf8(text)) {
-        object[key] = std::string(text);
+        appendString(out, text);
         return;
     }
-    object[key] = replaceInvalidUtf8(text);
-    object[key + "_base64"] = base64(text);
+    appendString(out, replaceInvalidUtf8(text));
+    out += ",\"";
+    out += key;
+    out += "_base64\":\"";
+    out += base64(text);
+    out += '"';
 }
 
 }  // namespace
@@ -91,23 +124,29 @@ std::string_view statusName(SearchStatus status) {
 }
 
 std::string resultFileJson(const ResultFile& file) {
-    Json object = Json::object();
-    addText(object, "repo", file.repo);
-    addText(object, "path", file.path);
-    Json lines = Json::array();
-    for (const ResultLine& line : file.lines) {
-        Json entry = Json::object();
-        entry["line"] = line.number;
-        addText(entry, "text", line.text);
-        Json matches = Json::array();
-        for (const Span& span : line.matches) {
-            matches.push_back(Json{{"start", span.begin}, {"end", span.end}});
+    std::string out = "{";
+    appendText(out, "repo", file.repo);
+    out += ',';
+    appendText(out, "path", file.path);
+    out += ",\"lines\":[";
+    for (std::size_t l = 0; l < file.lines.size(); ++l) {
+        const ResultLine& line = file.lines[l];
+        out += l == 0 ? "{\"line\":" : ",{\"line\":";
+        out += std::to_string(line.number);
+        out += ',';
+        appendText(out, "text", line.text);
+        out += ",\"matches\":[";
+        for (std::size_t m = 0; m < line.matches.size(); ++m) {
+            out += m == 0 ? "{\"start\":" : ",{\"start\":";
+            out += std::to_string(line.matches[m].begin);
+            out += ",\"end\":";
+            out += std::to_string(line.matches[m].end);
+            out += '}';
         }
-        entry["matches"] = std::move(matches);
-        lines.push_back(std::move(entry));
+        out += "]}";
     }
-    object["lines"] = std::move(lines);
-    return escapeTerminalControls(object.dump());
+    out += "]}";
+    return out;
 }
 
 JsonResultWriter::JsonResultWriter(std::ostream& out) : out_(&out) {
@@ -115,11 +154,12 @@ JsonResultWriter::JsonResultWriter(std::ostream& out) : out_(&out) {
 }
 
 void JsonResultWriter::file(const ResultFile& file) {
-    if (!first_) {
-        *out_ << ',';
-    }
+    // Made before anything is written: if this throws (out of memory),
+    // there's no comma waiting for a file that never comes, and fail() can
+    // still end the document as valid JSON.
+    const std::string json = resultFileJson(file);
+    *out_ << (first_ ? "\n" : ",\n") << json;
     first_ = false;
-    *out_ << '\n' << resultFileJson(file);
 }
 
 void JsonResultWriter::finish(SearchStatus status) {
@@ -127,12 +167,9 @@ void JsonResultWriter::finish(SearchStatus status) {
 }
 
 void JsonResultWriter::fail(std::string_view message) {
-    const Json text = std::string(message);
-    // dump(-1, ' ', false, replace): no indenting, keep non-ASCII as it is,
-    // and turn bytes that aren't valid UTF-8 into U+FFFD instead of throwing.
-    *out_ << (first_ ? "" : "\n") << R"(],"status":"error","error":)"
-          << escapeTerminalControls(text.dump(-1, ' ', false, Json::error_handler_t::replace))
-          << "}\n";
+    std::string text;
+    appendString(text, replaceInvalidUtf8(message));
+    *out_ << (first_ ? "" : "\n") << R"(],"status":"error","error":)" << text << "}\n";
 }
 
 }  // namespace codesearch
