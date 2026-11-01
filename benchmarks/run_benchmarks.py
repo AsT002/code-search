@@ -191,16 +191,22 @@ def bench_during_update(cs, queries, repos, env, runs):
     quiet = [statistics.median(ts) for ts in zip(*[search_all() for _ in range(runs)])]
     largest = repos[-1][0]
     stop = Path(env["CODE_SEARCH_HOME"]) / "stop-rebuilding"
+    # The loop stops with exit code 1 as soon as an update fails: searches
+    # timed next to a failing update would say nothing about a real one.
     loop = subprocess.Popen(
-        ["sh", "-c", f'while [ ! -e "$1" ]; do "$0" update {largest} --rebuild >/dev/null 2>&1; done', cs, str(stop)],
+        ["sh", "-c", f'while [ ! -e "$1" ]; do "$0" update {largest} --rebuild >/dev/null 2>&1 || exit 1; done',
+         cs, str(stop)],
         env=env)
     try:
         time.sleep(0.5)
         busy = [statistics.median(ts) for ts in zip(*[search_all() for _ in range(runs)])]
+        stopped_early = loop.poll() is not None
     finally:
         stop.touch()
-        loop.wait()
+        code = loop.wait()
         stop.unlink()
+    if stopped_early or code != 0:
+        raise RuntimeError(f"update {largest} --rebuild failed while searches were timed")
     print("### Searches during an update (ms, median of runs)\n")
     rows = [[f"`{q}`", ms(a), ms(b)] for q, a, b in zip(picked, quiet, busy)]
     rows.append(["**p50**", ms(percentile(quiet, 0.5)), ms(percentile(busy, 0.5))])
@@ -215,13 +221,16 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--skip-build", action="store_true", help="reuse the workspace from an earlier run")
     parser.add_argument("--only", choices=["build", "search", "update"], help="run just one part")
-    parser.add_argument("--group", help="search only the queries in this group")
+    parser.add_argument("--group", help="time only this group's queries in the search part")
     args = parser.parse_args()
 
     repos = read_tsv(HERE / "repos.tsv")
     queries = read_tsv(HERE / "queries.tsv")
-    if args.group:
-        queries = [q for q in queries if q[0] == args.group]
+    # --group only picks what the search part runs. The update part uses its
+    # own fixed set of groups.
+    searched = [q for q in queries if args.group in (None, q[0])]
+    if not searched:
+        sys.exit(f"no queries in group {args.group}")
     repo_dir = args.work_dir / "repos"
     for name, url, commit in repos:
         clone(url, commit, repo_dir / name)
@@ -231,7 +240,7 @@ def main():
     if not args.skip_build and args.only in (None, "build"):
         bench_build(cs, repos, repo_dir, env)
     if args.only in (None, "search"):
-        bench_search(cs, queries, repos, repo_dir, env, args.runs)
+        bench_search(cs, searched, repos, repo_dir, env, args.runs)
     if args.only in (None, "update"):
         bench_during_update(cs, queries, repos, env, args.runs)
 

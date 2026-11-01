@@ -2,23 +2,50 @@
 
 #include <gtest/gtest.h>
 
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#else
+#include <malloc.h>
+#endif
+
 #include <atomic>
 #include <cstdlib>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../support/failing_pool.hpp"
 #include "codesearch/index/memory_index.hpp"
 #include "codesearch/search/evaluator.hpp"
 
-// Counts the bytes allocated with new while gCounting is on, so a test can
-// check how much a search allocates. Replacing the global operator new is
-// the standard way to see allocations; it applies to this whole test program.
+// A replaced global operator new, so tests can see how a search uses
+// memory and make an allocation fail. Replacing it is the standard way to do
+// that; it applies to this whole test program.
+//
+// - Live bytes are counted all the time. While gCounting is on, gAllocated
+//   adds up what's allocated and gPeak keeps the most live at once.
+// - If gFailIn is set, the gFailIn-th allocation on a thread other than
+//   gMainThread throws std::bad_alloc, as when memory runs out.
 namespace {
 // Globals, because operator new has nowhere else to keep them.
-std::atomic<bool> gCounting = false;      // NOLINT(*-avoid-non-const-global-variables)
-std::atomic<std::size_t> gAllocated = 0;  // NOLINT(*-avoid-non-const-global-variables)
+// NOLINTBEGIN(*-avoid-non-const-global-variables)
+std::atomic<bool> gCounting = false;
+std::atomic<std::size_t> gAllocated = 0;
+std::atomic<std::size_t> gLive = 0;
+std::atomic<std::size_t> gPeak = 0;
+std::atomic<long> gFailIn = 0;
+std::atomic<std::thread::id> gMainThread;
+// NOLINTEND(*-avoid-non-const-global-variables)
+
+// How big the block really is, so delete can count it off again.
+std::size_t blockSize(const void* memory) {
+#ifdef __APPLE__
+    return malloc_size(memory);
+#else
+    return malloc_usable_size(memory);
+#endif
+}
 }  // namespace
 
 // The parameters are named as in libc++'s own declarations, because
@@ -26,24 +53,39 @@ std::atomic<std::size_t> gAllocated = 0;  // NOLINT(*-avoid-non-const-global-var
 // Names starting with __ are reserved for the library, hence the NOLINT.
 // NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
 void* operator new(std::size_t __sz) {
-    if (gCounting) {
-        gAllocated += __sz;
+    if (gFailIn > 0 && std::this_thread::get_id() != gMainThread.load()) {
+        // fetch_sub returns the value from before it subtracted.
+        if (gFailIn.fetch_sub(1) == 1) {
+            throw std::bad_alloc();
+        }
     }
     void* memory = std::malloc(__sz == 0 ? 1 : __sz);  // NOLINT(*-no-malloc,*-owning-memory)
     if (memory == nullptr) {
         throw std::bad_alloc();
+    }
+    const std::size_t live = gLive += blockSize(memory);
+    if (gCounting) {
+        gAllocated += __sz;
+        // Raise gPeak to `live` unless another thread already raised it
+        // higher. compare_exchange_weak updates `peak` when it fails.
+        std::size_t peak = gPeak;
+        while (live > peak && !gPeak.compare_exchange_weak(peak, live)) {
+        }
     }
     return memory;
 }
 
 // NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
 void operator delete(void* __p) noexcept {
+    if (__p != nullptr) {
+        gLive -= blockSize(__p);
+    }
     std::free(__p);  // NOLINT(*-no-malloc,*-owning-memory)
 }
 
 // NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp)
 void operator delete(void* __p, std::size_t /*__sz*/) noexcept {
-    std::free(__p);  // NOLINT(*-no-malloc,*-owning-memory)
+    operator delete(__p);
 }
 
 namespace codesearch {
@@ -346,6 +388,75 @@ TEST(SearchReposOnAPool, LimitBoundsWhatIsPrepared) {
     EXPECT_EQ(status, SearchStatus::Truncated);
     EXPECT_EQ(lines, 1U);
     EXPECT_LT(gAllocated.load(), std::size_t{512} << 10U) << "bytes allocated";
+}
+
+// The matches kept for a limited search must not keep the memory of all
+// of them: here every file has 4000 matches and only 1 is shown. Keeping
+// them all for the 64 files read ahead took about 16 MiB.
+TEST(SearchReposOnAPool, LimitBoundsWhatIsKept) {
+    IndexBuilder builder;
+    std::string content;
+    for (int n = 0; n < 4000; ++n) {
+        content += "needle\n";
+    }
+    for (int i = 0; i < 64; ++i) {
+        builder.add("f" + std::to_string(i), content);
+    }
+    const MemoryIndex index = builder.build();
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("needle");
+    request.maxResults = 1;
+    request.pool = &pool;
+
+    const std::size_t before = gLive;
+    gPeak = before;
+    gCounting = true;
+    const SearchStatus status = searchRepos(targets, request, [](const ResultFile&) {});
+    gCounting = false;
+    EXPECT_EQ(status, SearchStatus::Truncated);
+    EXPECT_LT(gPeak - before, std::size_t{4} << 20U) << "most bytes live at once";
+}
+
+// If a pool thread runs out of memory partway through a file, the search
+// must throw std::bad_alloc or give correct results, never a half-made
+// result. With one pool thread, the Nth allocation on it is the same each
+// run, so failing each one in turn tries every point.
+TEST(SearchReposOnAPool, OutOfMemoryOnAThreadNeverGivesAHalfResult) {
+    const MemoryIndex index = manyFiles(20);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(1);
+    gMainThread = std::this_thread::get_id();
+    for (const std::size_t limit : {0U, 1U, 3U}) {
+        SearchRequest request;
+        request.query = literal("needle");
+        request.maxResults = limit;
+        SearchStatus expectedStatus = SearchStatus::Complete;
+        const std::vector<std::string> expected = found(targets, request, &expectedStatus);
+        request.pool = &pool;
+        for (long failAt = 1; failAt <= 400; ++failAt) {
+            SCOPED_TRACE("limit " + std::to_string(limit) + ", allocation " +
+                         std::to_string(failAt));
+            std::vector<std::string> got;
+            gFailIn = failAt;
+            try {
+                const SearchStatus status =
+                    searchRepos(targets, request, [&](const ResultFile& file) {
+                        got.push_back(file.repo + ":" + file.path + ":" +
+                                      std::to_string(file.lines.size()));
+                    });
+                gFailIn = 0;
+                EXPECT_EQ(status, expectedStatus);
+                EXPECT_EQ(got, expected);
+            } catch (const std::bad_alloc&) {
+                gFailIn = 0;
+                // What came out before the error must be the start of the results.
+                ASSERT_LE(got.size(), expected.size());
+                EXPECT_TRUE(std::equal(got.begin(), got.end(), expected.begin()));
+            }
+        }
+    }
 }
 
 // Damage past the limit is never reached one file at a time, so the pool

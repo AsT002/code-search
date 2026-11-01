@@ -189,20 +189,22 @@ bool emit(const std::string& repo, const std::string& path, std::span<const Matc
     return shown == lineCount;  // false: this file had more than the limit allows
 }
 
-// Drops the matches past the first `lines` lines that have matches.
-void keepFirstLines(std::vector<Match>& matches, std::size_t lines) {
+// The matches on the first `lines` lines that have matches, in a vector of
+// just that size. (resize() would keep the memory of all of them.)
+std::vector<Match> firstLines(const std::vector<Match>& matches, std::size_t lines) {
     std::size_t seen = 0;
     std::size_t previous = 0;  // lines start at 1, so 0 is never a match's line
-    for (std::size_t i = 0; i < matches.size(); ++i) {
-        if (matches[i].line != previous) {
+    std::size_t end = 0;
+    for (; end < matches.size(); ++end) {
+        if (matches[end].line != previous) {
             if (seen == lines) {
-                matches.resize(i);
-                return;
+                break;
             }
             ++seen;
-            previous = matches[i].line;
+            previous = matches[end].line;
         }
     }
+    return {matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(end)};
 }
 
 // An IndexFileError from searching `repo`, with the repo's name in front.
@@ -398,21 +400,21 @@ void ParallelSearch::check(Chunk& chunk) {
                 if (!repo.evaluator->matches(doc, path, content)) {
                     return;
                 }
-                Found& found = chunk.found.emplace_back();
-                found.doc = doc;
-                found.path = std::string(path);
-                std::vector<Match> matches =
+                // Made here and added once it's complete, so if something
+                // throws partway (like running out of memory), the chunk
+                // never holds a half-made result.
+                Found found{.doc = doc, .path = std::string(path)};
+                const std::vector<Match> matches =
                     locate(content, repo.evaluator->collectSpans(doc, path, content));
                 found.lineCount = countLines(matches);
-                if (request_.filesOnly || found.lineCount == 0) {
-                    return;  // the file itself is the result
+                if (!request_.filesOnly && found.lineCount != 0) {
+                    const std::size_t kept = request_.maxResults == 0
+                                                 ? found.lineCount
+                                                 : std::min(found.lineCount, request_.maxResults);
+                    found.lines = resultLines(content, matches, request_.contextLines, kept);
+                    found.matches = firstLines(matches, kept);
                 }
-                const std::size_t kept = request_.maxResults == 0
-                                             ? found.lineCount
-                                             : std::min(found.lineCount, request_.maxResults);
-                found.lines = resultLines(content, matches, request_.contextLines, kept);
-                keepFirstLines(matches, kept);
-                found.matches = std::move(matches);
+                chunk.found.push_back(std::move(found));
             });
         }
     } catch (...) {  // a task must not throw; run() passes it on
