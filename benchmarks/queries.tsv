@@ -1,0 +1,52 @@
+# Benchmark queries: group<TAB>query, in code-search's query language.
+# Picked for the repos in benchmarks/repos.tsv. The file counts in the
+# comments are from `rg -i -F -l` over all three repos.
+#
+# rare: in a few dozen files at most
+rare	ParseDuration
+rare	EXPECT_DEATH
+rare	runtime.gopark
+rare	brew_cask
+rare	MustCompile
+rare	Deprecated:
+# missing: in no file
+missing	xyzzyplugh
+missing	quuxfrobnicate
+missing	notawordatall9
+missing	"func zzzq("
+# common: in thousands of files
+common	func
+common	return
+common	the
+common	error
+common	"if err != nil"
+common	http
+# short: 1 or 2 bytes, so the index can't narrow anything down
+short	a
+short	if
+short	go
+short	{
+short	x
+short	ab
+# filter: path:, lang: and repo: carry most of the query
+filter	lang:go TODO
+filter	path:src/net func
+filter	lang:ruby def
+filter	path:_test.go t.Fatal
+filter	lang:go -TODO
+filter	repo:brew Formula
+# boolean: or, and, -
+boolean	TODO or FIXME
+boolean	sync.Mutex sync.WaitGroup
+boolean	func -return
+boolean	(Context or Deadline) cancel
+boolean	MustCompile -regexp
+boolean	error -lang:go
+# case: case-sensitive
+case	case:yes Context
+case	case:yes TODO
+# long: many trigrams, so the index step does the most work
+long	"if err != nil { return err }"
+long	"func (s *Server) ServeHTTP("
+long	"t.Fatalf(\"unexpected error: %v\", err)"
+long	"def initialize(name, version)"

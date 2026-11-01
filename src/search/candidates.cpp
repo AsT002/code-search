@@ -26,36 +26,40 @@ std::vector<DocId> toVector(PostingCursor cursor) {
     return docs;
 }
 
-// Docs that are in every list. Starts from the shortest list and stops as soon
-// as any list runs out. `cursors` must not be empty.
+// Checking one candidate file costs about as much as stepping through this
+// many posting list entries (measured in M7, see docs/BENCHMARKS.md).
+// Intersecting stops before a list longer than that many entries per
+// candidate left: checking those few files is cheaper than walking the list
+// to rule some of them out.
+constexpr std::size_t kEntriesPerFile = 256;
+
+// Docs that are in every list, or a few more (see kEntriesPerFile). Starts
+// from the shortest list and keeps only its docs that are in the next list,
+// then the next, so each longer list is only searched for the docs still
+// left. `cursors` must not be empty.
 std::vector<DocId> intersect(std::vector<PostingCursor> cursors) {
     std::sort(cursors.begin(), cursors.end(), [](const PostingCursor& a, const PostingCursor& b) {
         return a.size() < b.size();
     });
-
-    std::vector<DocId> result;
-    PostingCursor& lead = cursors[0];
-    while (!lead.done()) {
-        DocId candidate = lead.doc();
-        bool inAll = true;
-        for (std::size_t i = 1; i < cursors.size(); ++i) {
-            PostingCursor& other = cursors[i];
-            other.advance(candidate);
+    std::vector<DocId> result = toVector(cursors[0]);
+    for (std::size_t i = 1; i < cursors.size() && !result.empty(); ++i) {
+        PostingCursor& other = cursors[i];
+        // The lists are sorted by length, so every list after this one is
+        // at least as long: none of them is worth walking either.
+        if (other.size() / kEntriesPerFile > result.size()) {
+            break;
+        }
+        std::vector<DocId> kept;
+        for (const DocId doc : result) {
+            other.advance(doc);
             if (other.done()) {
-                return result;  // this list ran out, so no more matches anywhere
-            }
-            if (other.doc() != candidate) {
-                candidate = other.doc();  // no doc before this one can be in every list
-                inAll = false;
                 break;
             }
+            if (other.doc() == doc) {
+                kept.push_back(doc);
+            }
         }
-        if (inAll) {
-            result.push_back(candidate);
-            lead.next();
-        } else {
-            lead.advance(candidate);
-        }
+        result = std::move(kept);
     }
     return result;
 }

@@ -32,6 +32,16 @@
       }
     },
     {
+      "name": "tsan",
+      "displayName": "Debug with ThreadSanitizer",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CODESEARCH_TSAN": "ON",
+        "CODESEARCH_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
       "name": "tidy",
       "displayName": "Debug with clang-tidy",
       "inherits": "base",
@@ -46,6 +56,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "asan", "configurePreset": "asan" },
+    { "name": "tsan", "configurePreset": "tsan" },
     { "name": "tidy", "configurePreset": "tidy" }
   ],
   "testPresets": [
@@ -64,6 +75,12 @@
         "ASAN_OPTIONS": "abort_on_error=1",
         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
       }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan",
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1" }
     }
   ]
 }

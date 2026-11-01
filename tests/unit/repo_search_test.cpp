@@ -89,7 +89,9 @@ public:
 
 private:
     const IndexReader* inner_;
-    mutable int reads_ = 0;  // mutable: withContent is const, but counting changes this
+    // mutable: withContent is const, but counting changes this. Atomic,
+    // since threads of a pool count at the same time.
+    mutable std::atomic<int> reads_ = 0;
 };
 
 MemoryIndex manyFiles(int count) {
@@ -231,6 +233,64 @@ TEST(SearchRepos, CancelStopsBeforeTheNextFile) {
     EXPECT_EQ(counted.reads(), 0);
 }
 
+// The pool gives the same results in the same order, across many chunks
+// and several repos, with and without a limit.
+TEST(SearchReposOnAPool, SameResultsInTheSameOrder) {
+    const MemoryIndex big = manyFiles(300);
+    const MemoryIndex small = manyFiles(5);
+    const std::vector<SearchTarget> targets = {
+        {.name = "a", .index = &small},
+        {.name = "b", .index = &big},
+        {.name = "c", .index = &small},
+    };
+    ThreadPool pool(4);
+    for (const std::size_t limit : {0U, 1U, 7U, 100U, 610U, 1000U}) {
+        SCOPED_TRACE(limit);
+        SearchRequest request;
+        request.query = literal("needle");
+        request.maxResults = limit;
+        SearchStatus inTurn = SearchStatus::Cancelled;
+        const std::vector<std::string> expected = found(targets, request, &inTurn);
+        request.pool = &pool;
+        SearchStatus onPool = SearchStatus::Cancelled;
+        EXPECT_EQ(found(targets, request, &onPool), expected);
+        EXPECT_EQ(onPool, inTurn);
+    }
+}
+
+// With a limit, the pool only reads a few chunks past the last result.
+TEST(SearchReposOnAPool, LimitStopsReadingEarly) {
+    const MemoryIndex index = manyFiles(1000);
+    CountingIndex counted(index);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &counted}};
+    ThreadPool pool(1);
+    SearchRequest request;
+    request.query = literal("needle");
+    request.maxResults = 3;
+    request.pool = &pool;
+    SearchStatus status = SearchStatus::Complete;
+    EXPECT_EQ(found(targets, request, &status),
+              (std::vector<std::string>{"r:f1000.go:2", "r:f1001.go:1"}));
+    EXPECT_EQ(status, SearchStatus::Truncated);
+    // 4 chunks of 16 files in flight with one thread, and the results need
+    // only the first 2 files read again.
+    EXPECT_LE(counted.reads(), (4 * 16) + 2);
+}
+
+TEST(SearchReposOnAPool, Cancel) {
+    const MemoryIndex index = manyFiles(100);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(2);
+    const std::atomic<bool> cancelled = true;
+    SearchRequest request;
+    request.query = literal("needle");
+    request.cancelled = &cancelled;
+    request.pool = &pool;
+    SearchStatus status = SearchStatus::Complete;
+    EXPECT_TRUE(found(targets, request, &status).empty());
+    EXPECT_EQ(status, SearchStatus::Cancelled);
+}
+
 TEST(SearchRepos, DamageNamesTheRepo) {
     class BrokenIndex : public CountingIndex {
     public:
@@ -254,6 +314,40 @@ TEST(SearchRepos, DamageNamesTheRepo) {
     }
     targets[0].name = "";  // a folder that isn't added: no name to add
     EXPECT_THROW(found(targets, request), IndexFileError);
+}
+
+// On the pool, damage is reported when the results reach the damaged repo,
+// after the results of the repos before it.
+TEST(SearchReposOnAPool, DamageComesInOrder) {
+    class BrokenIndex : public CountingIndex {
+    public:
+        using CountingIndex::CountingIndex;
+        void withContent(DocId /*doc*/,
+                         const std::function<void(std::string_view)>& /*fn*/) const override {
+            throw IndexFileError("index file is damaged: test");
+        }
+    };
+    const MemoryIndex index = manyFiles(40);
+    const BrokenIndex broken(index);
+    const std::vector<SearchTarget> targets = {
+        {.name = "good", .index = &index},
+        {.name = "bad", .index = &broken},
+    };
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("needle");
+    request.pool = &pool;
+    std::size_t before = 0;
+    try {
+        searchRepos(targets, request, [&](const ResultFile& file) {
+            EXPECT_EQ(file.repo, "good");
+            ++before;
+        });
+        ADD_FAILURE() << "expected an error";
+    } catch (const RepoIndexError& error) {
+        EXPECT_EQ(error.repo(), "bad");
+    }
+    EXPECT_EQ(before, 40U);
 }
 
 }  // namespace

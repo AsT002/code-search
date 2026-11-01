@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(CODESEARCH_BUILD_TESTS "Build tests" ON)
 option(CODESEARCH_BUILD_BENCHMARKS "Build benchmarks" ON)
 option(CODESEARCH_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(CODESEARCH_TSAN "Build with ThreadSanitizer (can't be combined with CODESEARCH_SANITIZE)" OFF)
 option(CODESEARCH_WERROR "Treat warnings as errors" OFF)
 option(CODESEARCH_CLANG_TIDY "Run clang-tidy while compiling" OFF)
 
@@ -20,6 +21,11 @@ include(Tools)
 if(CODESEARCH_SANITIZE)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
   add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(CODESEARCH_TSAN)
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=thread)
 endif()
 
 include(Dependencies)  # each one is only fetched when something needs it
@@ -55,6 +61,7 @@ add_library(codesearch_core
   src/util/mmap_file.cpp
   src/util/object_id.cpp
   src/util/process.cpp
+  src/util/thread_pool.cpp
   src/util/utf8.cpp
   src/util/varint.cpp
   src/version.cpp

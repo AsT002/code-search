@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "codesearch/index/memory_index.hpp"
@@ -104,6 +106,28 @@ TEST(FindCandidates, OrInsideAnd) {
     const MemoryIndex index = sampleIndex();
     const QueryNode query = allOf({literal("hello"), anyOf({literal("say"), literal("zzz")})});
     EXPECT_EQ(findCandidates(index, planCandidates(query)), (std::vector<DocId>{2}));
+}
+
+// Once few candidates are left, a much longer list isn't walked: checking
+// those files is cheaper. So a doc the long list would rule out can stay.
+TEST(FindCandidates, StopsBeforeAListThatIsntWorthWalking) {
+    IndexBuilder builder;
+    for (int i = 0; i < 2000; ++i) {
+        builder.add(std::to_string(i), i == 5 ? "rare" : "common");
+    }
+    const MemoryIndex index = builder.build();
+    const auto term = [](std::string_view three) {
+        return TrigramQuery{TrigramTerm{packTrigram(three[0], three[1], three[2])}};
+    };
+    // "rar" is only in doc 5, and "com" is in every doc but 5.
+    const TrigramQuery both{AndQuery{{term("rar"), term("com")}}};
+    EXPECT_EQ(findCandidates(index, both), (std::vector<DocId>{5}));
+
+    // With lists of similar length, it intersects as usual.
+    IndexBuilder small;
+    small.add("a", "rare");
+    small.add("b", "common");
+    EXPECT_TRUE(findCandidates(small.build(), both).empty());
 }
 
 }  // namespace

@@ -1,0 +1,4 @@
+# Benchmark repos: name<TAB>GitHub URL<TAB>commit
+googletest	https://github.com/google/googletest	a8380b01a25ebdb130097b607b3afed2a58d04ba
+brew	https://github.com/Homebrew/brew	1f55ebf835304c959bd2617fe8086316c5d94b37
+go	https://github.com/golang/go	9dd31ba8ffc17cfd8df0508374cf2342580c7807

@@ -6,6 +6,7 @@
 #include "codesearch/git/git_repo.hpp"
 #include "codesearch/index/file_filter.hpp"
 #include "codesearch/index/memory_index.hpp"
+#include "codesearch/util/thread_pool.hpp"
 
 namespace codesearch {
 
@@ -26,7 +27,10 @@ struct CommitIndex {
 };
 
 // Reads every file in `commit` and indexes the ones the filter allows.
-// Throws GitError if Git fails or a file's contents are missing from the repo.
-CommitIndex indexCommit(const GitRepo& repo, const ObjectId& commit, const FileFilter& filter);
+// With a pool, each file's trigrams are worked out on its threads while Git
+// is read; the index comes out the same either way. Throws GitError if Git
+// fails or a file's contents are missing from the repo.
+CommitIndex indexCommit(const GitRepo& repo, const ObjectId& commit, const FileFilter& filter,
+                        ThreadPool* pool = nullptr);
 
 }  // namespace codesearch

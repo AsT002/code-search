@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -193,6 +194,68 @@ TEST(IndexCommit, MatchesGitGrep) {
                       gitGrepPaths(repo, commit, query, caseSensitive));
         }
     }
+}
+
+// Every doc's path and content, and every trigram's posting list.
+struct IndexDump {
+    std::vector<std::pair<std::string, std::string>> docs;
+    std::vector<std::pair<Trigram, std::vector<DocId>>> postings;
+    friend bool operator==(const IndexDump&, const IndexDump&) = default;
+};
+
+IndexDump dump(const MemoryIndex& index) {
+    IndexDump out;
+    for (DocId doc = 0; doc < index.docCount(); ++doc) {
+        index.withContent(doc, [&](std::string_view content) {
+            out.docs.emplace_back(std::string(index.path(doc)), std::string(content));
+        });
+    }
+    for (const Trigram trigram : index.trigrams()) {
+        std::vector<DocId> docs;
+        // trigrams() only lists trigrams that have a list, so there is one.
+        std::optional<PostingCursor> cursor = index.postings(trigram);
+        while (cursor.has_value() && !cursor->done()) {
+            docs.push_back(cursor->doc());
+            cursor->next();
+        }
+        out.postings.emplace_back(trigram, std::move(docs));
+    }
+    return out;
+}
+
+// Enough content for many batches, so files are added while others are
+// still on the pool. The index must come out exactly the same.
+TEST(IndexCommit, AThreadPoolGivesTheSameIndex) {
+    TempRepo repo;
+    for (int i = 0; i < 400; ++i) {
+        std::string content;
+        for (int line = 0; line < 400; ++line) {
+            content +=
+                "file " + std::to_string(i) + " line " + std::to_string(line * i % 97) + "\n";
+        }
+        repo.write("dir" + std::to_string(i % 7) + "/f" + std::to_string(i) + ".txt", content);
+    }
+    repo.write("skip.bin", std::string("\0binary", 7));
+    const ObjectId commit = repo.commit();
+
+    const CommitIndex alone = indexCommit(GitRepo(repo.dir()), commit, FileFilter());
+    ThreadPool pool(4);
+    const CommitIndex pooled = indexCommit(GitRepo(repo.dir()), commit, FileFilter(), &pool);
+    EXPECT_EQ(pooled.index.docCount(), 400U);
+    EXPECT_TRUE(dump(pooled.index) == dump(alone.index));
+    EXPECT_EQ(pooled.report.indexed.bytes, alone.report.indexed.bytes);
+    EXPECT_EQ(pooled.report.skipped.size(), alone.report.skipped.size());
+}
+
+TEST(IndexCommit, MissingFileContentsIsAnErrorOnAThreadPoolToo) {
+    TempRepo repo;
+    for (int i = 0; i < 50; ++i) {
+        repo.write("f" + std::to_string(i) + ".txt", std::string(100000, 'a') + std::to_string(i));
+    }
+    const ObjectId commit = repo.commit();
+    repo.removeObject(repo.blobId("f40.txt"));
+    ThreadPool pool(4);
+    EXPECT_THROW(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), &pool), GitError);
 }
 
 }  // namespace

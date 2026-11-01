@@ -38,13 +38,19 @@ std::vector<Trigram> MemoryIndex::trigrams() const {
 }
 
 DocId IndexBuilder::add(std::string path, std::string content) {
+    const std::vector<Trigram> trigrams = extractTrigrams(content);
+    return add(std::move(path), std::move(content), trigrams);
+}
+
+DocId IndexBuilder::add(std::string path, std::string content,
+                        const std::vector<Trigram>& trigrams) {
     if (index_.docs_.size() >= std::numeric_limits<DocId>::max()) {
         throw std::length_error("too many files for one index");
     }
     const auto id = static_cast<DocId>(index_.docs_.size());
 
     // extractTrigrams returns each trigram once, so each list gets this ID once.
-    for (const Trigram trigram : extractTrigrams(content)) {
+    for (const Trigram trigram : trigrams) {
         index_.postings_[trigram].push_back(id);
     }
     index_.docs_.push_back(MemoryIndex::Doc{std::move(path), std::move(content)});

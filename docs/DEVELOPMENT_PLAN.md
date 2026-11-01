@@ -269,6 +269,41 @@ limited memory; `--json` output stops changing.
 
 ## M7: Performance
 
+Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
+
+- Setup: `benchmarks/repos.tsv` pins googletest, brew and go by commit, and
+  `benchmarks/queries.tsv` has 40 queries in 8 groups. `search_bench` runs
+  them warm in one process; `run_benchmarks.py` runs them as fresh processes
+  next to `rg` and `git grep`, and measures builds, updates and searches
+  during an update.
+- The first profile showed that finding candidates takes under 0.3 ms for
+  every query. The time went to checking files: the case-insensitive literal
+  search (55%), building result lines (22%) and counting lines (10%). So the
+  biggest wins weren't on the plan's list:
+  - `LiteralMatcher::find` tests 32 start positions per step for the
+    pattern's first and last bytes, in a loop the compiler vectorizes.
+    Case-sensitive patterns that start with a rare byte use `memchr`.
+  - `resultLines` jumps to each matching line instead of finding every line
+    start, and `locate` counts newlines with `std::count`.
+- From the plan's list:
+  - one shared `ThreadPool` (one thread per core, at most 8) checks files in
+    chunks of 16, across repos, while the calling thread passes results on
+    in order. Result lines are built on the pool too.
+  - parallel indexing: trigrams are found on the pool while Git is read,
+    with at most 16 MiB of content waiting.
+  - intersecting stops before a list with more than 256 entries per file
+    left.
+  - stopping early with a limit was already done in M6 (results stream out).
+    The benchmarks report it as "Limit 10".
+  - a literal under `-` or in an `or` uses its own posting lists, so a file
+    without its trigrams isn't scanned for it.
+  - bitmaps and direct scans weren't built: finding candidates is at most
+    0.3 ms, so there's nothing for them to win.
+- The first version of the parallel search had a race: a task signaled the
+  condition variable after letting go of the lock, so the search could be
+  destroyed first. The differential test hung on it now and then. Tasks now
+  signal while holding the lock. There's a `tsan` preset now.
+
 - Benchmark setup: a fixed list of repos at exact commit IDs and a fixed list of
   queries, grouped by type (rare words, missing words, common trigrams, 1 to 2
   byte text, filter-heavy, AND/OR/NOT). Warm runs and fresh-process runs.

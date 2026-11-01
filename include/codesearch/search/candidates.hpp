@@ -7,7 +7,9 @@
 
 namespace codesearch {
 
-// Runs `query` against the index. Returns doc IDs in increasing order.
+// Runs `query` against the index. Returns doc IDs in increasing order: every
+// doc that can match, and maybe a few that can't, when checking them is
+// cheaper than ruling them out.
 std::vector<DocId> findCandidates(const IndexReader& index, const TrigramQuery& query);
 
 }  // namespace codesearch

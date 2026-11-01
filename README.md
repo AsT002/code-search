@@ -28,6 +28,7 @@ Other presets:
 | `debug`   | Debug build |
 | `release` | Optimized build, used for benchmarks |
 | `asan`    | Debug build with AddressSanitizer and UndefinedBehaviorSanitizer |
+| `tsan`    | Debug build with ThreadSanitizer, for the threaded search and build |
 | `tidy`    | Debug build that runs clang-tidy on every file |
 
 All presets treat compiler warnings as errors.
@@ -101,6 +102,13 @@ Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. That
 folder must be new, empty or already used by code-search: it refuses a folder
 that holds other files. Only one `add`, `update` or `remove` runs at a time; a
 second one waits. Searches never wait.
+
+Searches and builds use one thread per core, up to 8. Results still come out
+in the same order. On an M4, with googletest, brew and go added, a search for
+a rare word takes about 4 ms from start to finish, and indexing go takes under
+a second. See
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the numbers and how to run the
+benchmarks.
 
 To search a repo without adding it, use `--path`. It indexes the repo in memory
 every time, which is slow on big repos:

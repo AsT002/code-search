@@ -255,7 +255,8 @@ IngestReport RepoManager::buildAndPublish(RegistryStore& store, Registry& regist
                                           RepoEntry& entry, const GitRepo& repo,
                                           const ObjectId& commit) {
     const FileFilter filter(filterConfig_);
-    const CommitIndex built = indexCommit(repo, commit, filter);
+    ThreadPool pool(defaultThreadCount());
+    const CommitIndex built = indexCommit(repo, commit, filter, &pool);
     const ShardInfo info = shardInfoFor(commit, filter.config());
 
     RepoEntry updated = entry;

@@ -10,3 +10,10 @@ add_executable(storage_experiment
 )
 target_link_libraries(storage_experiment PRIVATE codesearch_core lz4)
 codesearch_set_warnings(storage_experiment)
+
+# Warm search timings over a workspace and a list of queries. See docs/BENCHMARKS.md.
+add_executable(search_bench
+  search_bench.cpp
+)
+target_link_libraries(search_bench PRIVATE codesearch_core)
+codesearch_set_warnings(search_bench)

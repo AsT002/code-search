@@ -21,6 +21,10 @@ std::vector<Trigram> extractTrigrams(std::string_view text) {
     // returns where they start; erase removes them.
     std::sort(trigrams.begin(), trigrams.end());
     trigrams.erase(std::unique(trigrams.begin(), trigrams.end()), trigrams.end());
+    // The vector still has room for every trigram, repeats and all: about 4
+    // bytes per byte of text. Give that back, since a parallel build keeps
+    // many of these at once.
+    trigrams.shrink_to_fit();
     return trigrams;
 }
 

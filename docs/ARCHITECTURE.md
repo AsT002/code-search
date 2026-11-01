@@ -376,14 +376,10 @@ index_bytes = C + 4·P + 24·T + N·D + L + header and padding
 
 Raw postings can be several times the content size for some files, and the
 stored contents add another 1×. In M2.5, delta-varint postings with raw contents
-came to 1.2 to 1.3× the source size (see [BENCHMARKS.md](BENCHMARKS.md)). Every
-build reports:
-
-- bytes per section, and bytes per byte of indexed source
-- total disk used by the workspace, including clones
-- peak disk during a rebuild (old index, new index and temp files)
-- peak memory while building
-- what was skipped and why
+came to 1.2 to 1.3× the source size (see [BENCHMARKS.md](BENCHMARKS.md)). Each
+build prints how many files and bytes it indexed, and what it skipped and why.
+Sizes per section, index size and peak memory are measured by the benchmarks,
+not printed by every build.
 
 ### Publishing a new index
 
@@ -540,16 +536,28 @@ result never has to sit in memory:
  │ PLANNER  │   2. for each repo: replace repo:X with true or false, simplify
  └────┬─────┘   3. for each repo: build a TrigramQuery that finds at least
       │            every matching file
-      ▼  for each repo
+      ▼  for each repo, on the calling thread
  ┌──────────────────────────────────────────────────────────────┐
- │ candidates = run(TrigramQuery)                               │
- │   for each candidate:                                        │
- │     Evaluator.matches(content)       uses the whole query    │
- │     Evaluator.collectSpans(content)                          │
+ │ candidates = run(TrigramQuery), split into chunks of 16      │
  └───────────────────────────────┬──────────────────────────────┘
-                                 ▼
+                                 ▼  each chunk, on the thread pool
+ ┌──────────────────────────────────────────────────────────────┐
+ │ for each candidate:                                          │
+ │   Evaluator.matches(content)       uses the whole query      │
+ │   Evaluator.collectSpans(content)                            │
+ │   the result lines                                           │
+ └───────────────────────────────┬──────────────────────────────┘
+                                 ▼  chunks taken in order, on the calling thread
                      results, in order, within limits
 ```
+
+Searches use one pool of threads (one per core, at most 8). The calling
+thread finds every repo's candidates first, which takes well under a
+millisecond. The pool's threads then check the files in chunks, and the
+calling thread passes the chunks on in order. So results come out in the same
+order as with one thread, and the limit cuts them at the same place. At most 4
+chunks per thread are in flight, so a slow reader of the results keeps memory
+small. Damage found in a repo is reported when the results get to it.
 
 ### Why we keep the whole query
 
@@ -571,7 +579,7 @@ handle `(repo:A foo) or (repo:B bar)`. Split up, it becomes
 | Text shorter than 3 bytes | `All` |
 | `A and B` | `And[A, B]` |
 | `A or B` | `Or[A, B]`, which merges the posting lists. If either side is `All`, the result is `All` |
-| `not A` | `All` in v1. A missing trigram does prove `A` is absent; we can use that later |
+| `not A` | `All`. The final check uses the index instead (see below) |
 | Filters like `lang:` or `path:` | `All` here. The final check applies them |
 | Regex | `All` in v1. See below |
 
@@ -584,10 +592,18 @@ it all false. In an `or`, true makes it match every file, but it stays next
 to the other branches instead of replacing the `or`, because they still say
 what to highlight.
 
+The final check also uses the index, for text the candidates don't cover:
+text under a `-`, and text in an `or` branch. For each such literal of 3+
+bytes, it looks up which files have all of its trigrams. A file without them
+can't contain the text, so it isn't searched for there. `lang:go -TODO` then
+reads only the Go files that might contain `TODO`.
+
 How each part runs:
 
-- `And`: step through the posting lists together, rarest first, and stop as soon
-  as one runs out.
+- `And`: start from the shortest posting list and keep only its files that are
+  in the next list, then the next. Stop as soon as none are left. Also stop
+  before a list with more than 256 entries per file still left: checking those
+  few files costs less than walking the list (measured in M7).
 - `Or`: merge the posting lists.
 - `All`: every file. `None`: no files.
 
@@ -604,7 +620,7 @@ code-search search "authenticate"
               aut uth the hen ent nti tic ica cat ate
  2. LOOK UP   binary search each one in the trigram table
  3. ORDER     rarest first: "nti"(41) "tic"(88) "aut"(212) …
- 4. INTERSECT step through the lists together, stop early if empty
+ 4. INTERSECT keep the files in every list, stop early if none are left
               → candidates {3, 17, 42}
  5. CHECK     withContent(3, …) → matches → collectSpans
  6. OUTPUT    src/auth/login.ts:12:14:  export async function authenticate(user) {
@@ -705,16 +721,15 @@ code-search/
 ├── include/codesearch/
 │   ├── git/        git_runner.hpp  git_repo.hpp
 │   ├── repo/       workspace.hpp  registry.hpp  publisher.hpp  github_url.hpp
-│   ├── index/      trigram.hpp  file_filter.hpp  index_builder.hpp
+│   ├── index/      trigram.hpp  file_filter.hpp  memory_index.hpp  index_reader.hpp
 │   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp
-│               posting_cursor.hpp  index_file_error.hpp
+│   │               posting_cursor.hpp  index_file_error.hpp
 │   ├── query/      ast.hpp  parser.hpp  language.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     literal_matcher.hpp  candidates.hpp  evaluator.hpp  searcher.hpp
 │   │               repo_search.hpp  json_output.hpp
 │   ├── app/        index_commit.hpp  repo_manager.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
-│                   object_id.hpp
-│                   thread_pool.hpp  file_lock.hpp
+│                   object_id.hpp  thread_pool.hpp  file_lock.hpp  ascii.hpp
 ├── src/                        same layout as include/
 ├── cli/main.cpp                builds the `code-search` program
 ├── tests/
@@ -724,7 +739,7 @@ code-search/
 │   ├── integration/            Git to search, start to finish
 │   ├── fuzz/                   index reader, query parser
 │   └── support/                brute-force search, temp Git repos, a fake `git` for broken output
-├── benchmarks/
+├── benchmarks/                 search_bench, run_benchmarks.py, repos.tsv, queries.tsv
 └── docs/
 ```
 
@@ -759,10 +774,10 @@ with the planner; otherwise a planner bug would hide itself.
 | Unit | Each module |
 | Candidates | Every real match survives the trigram step |
 | Literal search vs brute force | Same files and matches. Includes empty, short, common and missing queries, non-ASCII bytes, CRLF, no final newline, long lines and duplicate files |
-| Boolean queries | `repo:A foo or repo:B bar`, path filters inside OR, queries with only `-` terms or only filters, unknown repo, precedence and quotes |
+| Boolean queries | Random query trees over several repos, on one thread and on a thread pool, with and without a limit. `repo:A foo or repo:B bar`, path filters inside OR, queries with only `-` terms or only filters, unknown repo, precedence and quotes |
 | Regex vs brute force | Same results as RE2 run on every file with the same options |
 | Git | Pinned commit while HEAD moves, uncommitted changes, file names with newlines, tabs or a leading dash, symlinks, submodules, LFS pointers, huge files, SHA-256 rejection. The user's repo is never changed |
 | `git grep` | `git grep <commit-id>` on the same files, using syntax both support |
 | Publishing | Kill the process after every write, fsync and rename. The current state stays complete, cleanup removes leftovers, a second change waits for the lock, and searches keep working |
 | Fuzzing | Opening and reading damaged index files; the query parser with deep nesting and long input. We keep the inputs that found bugs |
-| Sanitizers | ASan and UBSan now. TSan once there's threaded code |
+| Sanitizers | ASan and UBSan, and TSan for the threaded search and build (`asan` and `tsan` presets) |

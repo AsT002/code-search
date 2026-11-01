@@ -12,6 +12,7 @@
 #include "codesearch/index/index_reader.hpp"
 #include "codesearch/query/ast.hpp"
 #include "codesearch/search/searcher.hpp"
+#include "codesearch/util/thread_pool.hpp"
 
 namespace codesearch {
 
@@ -68,6 +69,8 @@ struct SearchRequest {
     std::size_t contextLines = 0;
     bool filesOnly = false;
     const std::atomic<bool>* cancelled = nullptr;  // checked before each file
+    // Threads to check files on. nullptr checks them all on this thread.
+    ThreadPool* pool = nullptr;
 };
 
 // Searches each target in turn and calls onFile for each matching file:

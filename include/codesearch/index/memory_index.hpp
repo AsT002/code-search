@@ -38,6 +38,9 @@ public:
     // Returns the new file's doc ID. IDs start at 0 and go up by one, so every
     // posting list comes out sorted.
     DocId add(std::string path, std::string content);
+    // The same, with the content's trigrams already worked out by
+    // extractTrigrams, so that can happen on other threads.
+    DocId add(std::string path, std::string content, const std::vector<Trigram>& trigrams);
 
     // Hands over the finished index. The builder is empty afterwards.
     MemoryIndex build();

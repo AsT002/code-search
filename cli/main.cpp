@@ -214,14 +214,18 @@ struct BuiltRepo {
 
 // Indexes the repo's HEAD in memory and prints what was indexed. Returns
 // nothing, after saying why, if the repo has no commits.
-std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& filter) {
+std::optional<BuiltRepo> buildRepo(const std::string& path, const FileFilter& filter,
+                                   ThreadPool& pool) {
     const GitRepo repo(path);
     const std::optional<ObjectId> commit = repo.resolveHead();
     if (!commit.has_value()) {
         std::cerr << "code-search: the repository has no commits yet\n";
         return std::nullopt;
     }
-    BuiltRepo result{.commit = commit.value(), .built = indexCommit(repo, commit.value(), filter)};
+    BuiltRepo result{
+        .commit = commit.value(),
+        .built = indexCommit(repo, commit.value(), filter, &pool),
+    };
     printReport(result.commit, result.built.report);
     return result;
 }
@@ -341,6 +345,10 @@ int runSearch(const SearchArgs& args) {
         .cancelled = &gCancelled,
     };
 
+    // Files are checked on several threads; results still come out in order.
+    ThreadPool pool(defaultThreadCount());
+    request.pool = &pool;
+
     std::vector<SearchTarget> targets;
     std::optional<BuiltRepo> built;  // with --path
     std::vector<OpenRepo> repos;     // otherwise
@@ -348,7 +356,7 @@ int runSearch(const SearchArgs& args) {
         if (!repoNamesIn(request.query).empty()) {
             throw QueryError("repo: only works on added repos, not with --path");
         }
-        built = buildRepo(args.repoPath, FileFilter());
+        built = buildRepo(args.repoPath, FileFilter(), pool);
         if (!built.has_value()) {
             return 1;
         }

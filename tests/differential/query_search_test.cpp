@@ -208,6 +208,7 @@ std::vector<BruteFile> firstResults(const std::vector<BruteFile>& all, std::size
 TEST(QuerySearchDifferential, MatchesBruteForce) {
     constexpr std::uint32_t kSeeds = 200;
     constexpr int kQueriesPerSeed = 40;
+    ThreadPool threads(4);
     for (std::uint32_t seed = 1; seed <= kSeeds; ++seed) {
         Generator gen(seed);
         const std::vector<TestRepo> repos = gen.repos();
@@ -227,6 +228,7 @@ TEST(QuerySearchDifferential, MatchesBruteForce) {
             ASSERT_EQ(parseQuery(text).root, query) << "the parser read it back differently";
 
             const SearchOptions options{.caseSensitive = gen.number(0, 3) == 0};
+            const std::size_t limit = gen.number(1, 6);
             const std::vector<BruteFile> expected = bruteForceRepoSearch(repos, query, options);
 
             // Every real match must survive the trigram step in its repo.
@@ -247,21 +249,26 @@ TEST(QuerySearchDifferential, MatchesBruteForce) {
                 }
             }
 
-            SearchRequest request;
-            request.query = query;
-            request.options = options;
-            SearchStatus status = SearchStatus::Cancelled;
-            ASSERT_EQ(realSearch(repos, indexes, request, status), expected);
-            ASSERT_EQ(status, SearchStatus::Complete);
+            // On this thread, then on the pool: the same results either way.
+            for (ThreadPool* pool : {static_cast<ThreadPool*>(nullptr), &threads}) {
+                SCOPED_TRACE(pool == nullptr ? "one thread" : "thread pool");
+                SearchRequest request;
+                request.query = query;
+                request.options = options;
+                request.pool = pool;
+                SearchStatus status = SearchStatus::Cancelled;
+                ASSERT_EQ(realSearch(repos, indexes, request, status), expected);
+                ASSERT_EQ(status, SearchStatus::Complete);
 
-            // With a limit: the same results, cut at the same place.
-            request.maxResults = gen.number(1, 6);
-            bool cut = false;
-            const std::vector<BruteFile> limited = firstResults(expected, request.maxResults, cut);
-            ASSERT_EQ(realSearch(repos, indexes, request, status), limited)
-                << "limit " << request.maxResults;
-            ASSERT_EQ(status, cut ? SearchStatus::Truncated : SearchStatus::Complete)
-                << "limit " << request.maxResults;
+                // With a limit: the same results, cut at the same place.
+                request.maxResults = limit;
+                bool cut = false;
+                const std::vector<BruteFile> limited = firstResults(expected, limit, cut);
+                ASSERT_EQ(realSearch(repos, indexes, request, status), limited)
+                    << "limit " << limit;
+                ASSERT_EQ(status, cut ? SearchStatus::Truncated : SearchStatus::Complete)
+                    << "limit " << limit;
+            }
         }
     }
 }
