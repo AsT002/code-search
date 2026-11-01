@@ -23,6 +23,11 @@ if(CODESEARCH_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+if(CODESEARCH_TSAN AND CODESEARCH_SANITIZE)
+  message(FATAL_ERROR "CODESEARCH_TSAN and CODESEARCH_SANITIZE can't both be on: "
+                      "ThreadSanitizer and AddressSanitizer can't be in one build")
+endif()
+
 if(CODESEARCH_TSAN)
   add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
   add_link_options(-fsanitize=thread)

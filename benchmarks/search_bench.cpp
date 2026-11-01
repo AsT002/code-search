@@ -9,11 +9,14 @@
 // --max-results k. Then the same per group, as p50 and p95 over its queries.
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -108,8 +111,8 @@ struct QueryResult {
     double limited = 0;  // the whole run with maxResults = k
 };
 
-QueryResult measure(std::span<const SearchTarget> targets, const QueryLine& line, int rounds,
-                    std::size_t k, ThreadPool* pool) {
+QueryResult measure(std::span<const SearchTarget> targets, const QueryLine& line,
+                    std::size_t rounds, std::size_t k, ThreadPool* pool) {
     const ParsedQuery parsed = parseQuery(line.text);
     SearchRequest request;
     request.query = parsed.root;
@@ -122,7 +125,7 @@ QueryResult measure(std::span<const SearchTarget> targets, const QueryLine& line
     std::vector<double> firstK;
     std::vector<double> all;
     std::vector<double> limited;
-    for (int round = 0; round < rounds; ++round) {
+    for (std::size_t round = 0; round < rounds; ++round) {
         const Clock::time_point start = Clock::now();
         std::size_t candidates = 0;
         for (const SearchTarget& target : targets) {
@@ -166,44 +169,86 @@ std::string ms(double value) {
     return buffer.data();
 }
 
+// A whole number of at least 1, or nothing if `text` isn't one.
+std::optional<std::size_t> positive(const std::string& text) {
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc() || end != text.data() + text.size() || value == 0) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+int usage(const std::string& problem) {
+    std::cerr << "search_bench: " << problem
+              << "\nusage: search_bench <workspace> <queries file> [--rounds n] [--k n] "
+                 "[--threads n]\n";
+    return 2;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::vector<std::string> args(argv + 1, argv + argc);
     if (args.size() < 2) {
-        std::cerr << "usage: search_bench <workspace> <queries file> [--rounds n] [--k n] "
-                     "[--threads n]\n";
-        return 2;
+        return usage("needs a workspace and a queries file");
     }
-    int rounds = 5;
+    std::size_t rounds = 5;
     std::size_t k = 10;
     std::size_t threads = 1;
-    for (std::size_t i = 2; i + 1 < args.size(); i += 2) {
-        if (args[i] == "--rounds") {
-            rounds = std::stoi(args[i + 1]);
-        } else if (args[i] == "--k") {
-            k = std::stoul(args[i + 1]);
-        } else if (args[i] == "--threads") {
-            threads = std::stoul(args[i + 1]);
+    for (std::size_t i = 2; i < args.size(); i += 2) {
+        std::size_t* target = args[i] == "--rounds"    ? &rounds
+                              : args[i] == "--k"       ? &k
+                              : args[i] == "--threads" ? &threads
+                                                       : nullptr;
+        if (target == nullptr) {
+            return usage("unknown option " + args[i]);
         }
+        const std::optional<std::size_t> value =
+            i + 1 < args.size() ? positive(args[i + 1]) : std::nullopt;
+        if (!value.has_value()) {
+            return usage(args[i] + " needs a whole number of at least 1");
+        }
+        *target = value.value();
     }
 
+    // A wrong path would otherwise give a table of zeros that looks real.
     const Workspace workspace(args[0]);
-    const std::vector<OpenRepo> repos = openRepos(workspace, constant(true));
+    if (!std::filesystem::exists(workspace.registryFile())) {
+        return usage("no code-search workspace at " + args[0]);
+    }
+    std::vector<OpenRepo> repos;
+    try {
+        repos = openRepos(workspace, constant(true));
+    } catch (const std::exception& error) {
+        return usage(error.what());
+    }
+    if (repos.empty()) {
+        return usage("the workspace at " + args[0] + " has no repos");
+    }
     std::vector<SearchTarget> targets;
     for (const OpenRepo& repo : repos) {
         targets.push_back({.name = repo.name, .index = repo.index.get()});
     }
-    std::optional<ThreadPool> pool;
+    std::unique_ptr<ThreadPool> pool;
     if (threads > 1) {
-        pool.emplace(threads);
+        pool = std::make_unique<ThreadPool>(threads);
+    }
+    std::vector<QueryLine> queries;
+    try {
+        queries = readQueries(args[1]);
+    } catch (const std::exception& error) {
+        return usage(error.what());
+    }
+    if (queries.empty()) {
+        return usage("no queries in " + args[1]);
     }
 
     std::vector<QueryResult> results;
-    for (const QueryLine& line : readQueries(args[1])) {
+    for (const QueryLine& line : queries) {
         // One run first, so the files are in the page cache.
-        measure(targets, line, 1, k, pool ? &*pool : nullptr);
-        results.push_back(measure(targets, line, rounds, k, pool ? &*pool : nullptr));
+        measure(targets, line, 1, k, pool.get());
+        results.push_back(measure(targets, line, rounds, k, pool.get()));
     }
 
     const std::string kText = std::to_string(k);

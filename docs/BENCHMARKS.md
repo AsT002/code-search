@@ -21,14 +21,20 @@
 - Warm runs: `search_bench` opens the workspace once and runs each query 5
   times in the same process, after one run to warm the cache. It reports the
   median time to the first result, to the first 10, to all results, and to
-  finish with `--max-results 10`. Groups show p50 / p95 over their queries;
-  with 2 to 6 queries a group, p95 is close to the slowest one.
+  finish with `--max-results 10`. Groups show p50 / p95 over their queries,
+  by the nearest-rank method. With 2 to 6 queries a group, p95 is the
+  slowest query, and for the 2 case queries p50 / p95 is just the faster and
+  the slower one.
 - Fresh-process runs: `run_benchmarks.py` starts `code-search search` for
   each query (3 runs, median), reads all of its output and times the first
-  byte and the end. `rg -F` and `git grep -F` search the same checkouts, for
-  the queries that are plain text. They scan every file, and they don't skip
-  the files code-search skips (minified, over 1 MB), so they're a reference,
-  not a like-for-like race.
+  byte and the end. Writing to a pipe, the program sends its output in 16 KiB
+  blocks, so "first output" is when the first block is full or the program
+  ends, not when the first result is found. For a few results, it's the end.
+- `rg -F` and `git grep -F` search the same checkouts, for the queries that
+  are plain text. `git grep` runs once per repo, and its time is the three
+  runs added up. Neither is a like-for-like race: both read files code-search
+  skips (minified, over 1 MB), and `rg` skips hidden files (like `.github/`),
+  which code-search and `git grep` search. They're a reference.
 - Stages: each speedup was built and measured on top of the ones before it,
   from the M6 code (stage 0) to the final code (stage 5).
 
@@ -83,7 +89,8 @@ Warm, all results, ms. Stages 0 to 2 on one thread, the rest on 8.
 
    Case-sensitive search used `string_view::find` (memchr, then memcmp). The
    new filter was faster for patterns starting with a common byte and slower
-   for a rare one:
+   for a rare one (ms, all results, one thread, with the line changes of
+   step 2):
 
    | Query | memchr | filter |
    |-------|-------:|-------:|
@@ -139,9 +146,10 @@ Warm, all results, ms. Stages 0 to 2 on one thread, the rest on 8.
    | `"func (s *Server) ServeHTTP("` | 0.26 | 0.28 | 0.15 | 0.26 | 0.16 |
    | `"def initialize(name, version)"` | 0.53 | 0.55 | 0.39 | 0.55 | 0.46 |
 
-   For these queries, finding candidates is most of the search. A fixed "stop at 32 files" hurt missing words, which
-   end with 0 or 1 files after every list. The cost rule doesn't, so it's the
-   one kept. The savings are a few tenths of a millisecond.
+   For these queries, finding candidates is most of the search. A fixed
+   "stop at 32 files" hurt missing words, which end with 0 or 1 files after
+   every list. The cost rule doesn't, so it's the one kept. The savings are a
+   few tenths of a millisecond.
 
 6. **Stop early with a limit.** Already done in M6: results stream out, so a
    limited search stops reading files once it has enough. The "Limit 10"
@@ -156,44 +164,53 @@ Warm, all results, ms. Stages 0 to 2 on one thread, the rest on 8.
 
 ### Warm searches, all groups
 
-ms, p50 / p95. Before: stage 0 on one thread. After: stage 5 on 8 threads.
+ms, p50 / p95. Before: stage 0 on one thread. After: the final code (stage 5
+with the review fixes below) on 8 threads.
 
-| Group | First result, before | after | All, before | after | Limit 10, before | after |
-|-------|----:|----:|----:|----:|----:|----:|
-| rare | 0.28 / 5.71 | 0.25 / 0.50 | 10.6 / 33.8 | 0.53 / 1.01 | 0.69 / 10.1 | 0.36 / 0.69 |
-| missing | 0.00 / 1.22 | 0.00 / 0.13 | 0.00 / 1.22 | 0.00 / 0.13 | 0.00 / 1.22 | 0.00 / 0.13 |
-| common | 0.01 / 0.79 | 0.14 / 0.44 | 211.8 / 258.2 | 9.56 / 16.1 | 0.09 / 0.84 | 0.22 / 0.53 |
-| short | 0.01 / 0.07 | 0.08 / 0.12 | 281.0 / 530.4 | 17.9 / 99.7 | 0.01 / 0.17 | 0.14 / 0.30 |
-| filter | 0.06 / 0.46 | 0.21 / 0.63 | 25.4 / 81.9 | 1.74 / 2.28 | 0.20 / 0.51 | 0.26 / 0.74 |
-| boolean | 0.07 / 8.60 | 0.30 / 0.84 | 71.4 / 147.3 | 3.26 / 3.93 | 0.54 / 8.60 | 0.43 / 1.06 |
-| case | 0.01 / 0.04 | 0.09 / 0.25 | 18.3 / 28.6 | 1.62 / 1.97 | 0.11 / 0.12 | 0.15 / 0.33 |
-| long | 0.35 / 5.90 | 0.46 / 0.50 | 5.32 / 11.0 | 0.46 / 0.67 | 0.98 / 5.91 | 0.45 / 0.56 |
+| Group | First, before | after | First 10, before | after | All, before | after | Limit 10, before | after |
+|-------|----:|----:|----:|----:|----:|----:|----:|----:|
+| rare | 0.28 / 5.71 | 0.28 / 0.65 | 0.68 / 10.0 | 0.28 / 0.79 | 10.6 / 33.8 | 0.53 / 0.97 | 0.69 / 10.1 | 0.34 / 0.83 |
+| missing | 0.00 / 1.22 | 0.00 / 0.11 | 0.00 / 1.22 | 0.00 / 0.11 | 0.00 / 1.22 | 0.00 / 0.11 | 0.00 / 1.22 | 0.00 / 0.11 |
+| common | 0.01 / 0.79 | 0.09 / 0.32 | 0.07 / 0.83 | 0.13 / 0.33 | 211.8 / 258.2 | 9.56 / 15.9 | 0.09 / 0.84 | 0.18 / 0.40 |
+| short | 0.01 / 0.07 | 0.06 / 0.09 | 0.01 / 0.14 | 0.07 / 0.11 | 281.0 / 530.4 | 17.5 / 102.3 | 0.01 / 0.17 | 0.14 / 0.18 |
+| filter | 0.06 / 0.46 | 0.11 / 0.74 | 0.20 / 0.48 | 0.12 / 0.86 | 25.4 / 81.9 | 1.89 / 2.68 | 0.20 / 0.51 | 0.20 / 0.94 |
+| boolean | 0.07 / 8.60 | 0.11 / 0.84 | 0.53 / 8.60 | 0.17 / 0.84 | 71.4 / 147.3 | 3.01 / 4.07 | 0.54 / 8.60 | 0.23 / 1.10 |
+| case | 0.01 / 0.04 | 0.06 / 0.23 | 0.10 / 0.10 | 0.15 / 0.24 | 18.3 / 28.6 | 1.63 / 1.93 | 0.11 / 0.12 | 0.31 / 0.32 |
+| long | 0.35 / 5.90 | 0.29 / 0.49 | 0.97 / 5.90 | 0.34 / 0.49 | 5.32 / 11.0 | 0.48 / 0.69 | 0.98 / 5.91 | 0.38 / 0.49 |
+
+Where a query finds its first results in the first few files, they come
+about 0.1 ms later than on one thread: the cost of handing work to the pool.
 
 ### Fresh-process searches
 
 ms, p50 / p95. Each run starts the program, opens the three index files and
-prints the results as text to a pipe.
+prints the results as text to a pipe. Before: stage 0. After: the final
+code. `rg` and `git grep` are from the same run as "after".
 
-| Group | First result, before | after | All, before | after | rg | git grep |
+| Group | First output, before | after | All, before | after | rg | git grep |
 |-------|----:|----:|----:|----:|----:|----:|
-| rare | 11.9 / 19.9 | 3.36 / 3.74 | 12.3 / 39.5 | 3.66 / 4.62 | 235 / 243 | 258 / 260 |
-| missing | 2.68 / 4.01 | 2.77 / 2.88 | 2.68 / 4.01 | 2.77 / 2.88 | 238 / 259 | 260 / 423 |
-| common | 4.24 / 5.70 | 3.84 / 4.36 | 289.4 / 415.9 | 58.5 / 121.7 | 250 / 264 | 255 / 258 |
-| short | 3.39 / 6.43 | 4.54 / 6.90 | 447.6 / 1633 | 230.1 / 1128 | 272 / 532 | 286 / 760 |
-| filter | 3.16 / 6.43 | 3.47 / 5.29 | 38.7 / 120.5 | 9.60 / 15.3 | | |
-| boolean | 11.4 / 21.5 | 3.40 / 6.25 | 92.0 / 163.0 | 7.84 / 14.0 | | |
-| case | 4.27 / 4.29 | 3.59 / 3.66 | 26.6 / 36.3 | 6.92 / 7.22 | 230 / 232 | 250 / 252 |
-| long | 8.44 / 15.2 | 3.62 / 3.83 | 8.44 / 15.5 | 3.76 / 3.85 | 229 / 314 | 255 / 267 |
+| rare | 11.9 / 19.9 | 3.40 / 4.04 | 12.3 / 39.5 | 3.82 / 4.68 | 217 / 291 | 252 / 256 |
+| missing | 2.68 / 4.01 | 2.80 / 2.88 | 2.68 / 4.01 | 2.80 / 2.88 | 217 / 231 | 253 / 258 |
+| common | 4.24 / 5.70 | 3.96 / 4.31 | 289.4 / 415.9 | 57.5 / 121.9 | 245 / 262 | 251 / 254 |
+| short | 3.39 / 6.43 | 3.72 / 5.76 | 447.6 / 1633 | 140.1 / 1103 | 261 / 316 | 261 / 454 |
+| filter | 3.16 / 6.43 | 3.30 / 5.03 | 38.7 / 120.5 | 9.08 / 16.0 | | |
+| boolean | 11.4 / 21.5 | 3.41 / 5.93 | 92.0 / 163.0 | 7.68 / 13.6 | | |
+| case | 4.27 / 4.29 | 3.53 / 3.56 | 26.6 / 36.3 | 6.64 / 7.18 | 225 / 231 | 257 / 258 |
+| long | 8.44 / 15.2 | 3.51 / 3.59 | 8.44 / 15.5 | 3.55 / 3.74 | 218 / 231 | 255 / 258 |
+
+The script first rejected `Deprecated:` as a filter, so `rg` and `git grep`
+had 5 rare queries to code-search's 6. It now treats only `repo:`, `path:`,
+`file:`, `lang:` and `case:` as filters, like code-search does.
 
 About 3 ms of every fresh run is starting the program and opening the
 indexes. For big result sets, printing is now most of the time: `the` takes
-16 ms warm but 122 ms here, and `a` (2.1 million lines) is slower than `rg`.
+16 ms warm but 122 ms here, and `a` (2.1 million lines) takes 1.1 s, against
+316 ms for `rg`.
 The text output, on one thread, is the next thing to speed up.
 
 The first run of the script passed `-s` to `git grep` for case-sensitive
 queries. To `git grep` that's an unknown option, so it failed in 14 ms, and
-the script counted that as a time. The script now checks exit codes, and the
-`git grep` case numbers above are from a rerun of that group.
+the script counted that as a time. The script now checks exit codes.
 
 ### Build
 
@@ -210,7 +227,7 @@ At most 16 MiB of read content waits for the pool, which bounds the extra
 memory. The first version allowed 64 MiB and kept each file's trigram vector
 at its full starting size, 4 bytes per byte of content: go peaked at
 597 MiB. Shrinking those vectors and lowering the limit brought it to
-300 MiB. The no-op update is the same before and after: it checks the commit
+306 MiB. The no-op update is the same before and after: it checks the commit
 and the index header, and builds nothing.
 
 ### Searches during an update
@@ -226,10 +243,35 @@ Fresh-process searches of the rare, common and boolean queries, while
 Searches don't take the lock, so they never wait. The median got 27% slower,
 because the build uses the same cores.
 
+### Memory for searches without a limit
+
+A review found that the pool could hold far more results than one thread
+does. It read ahead up to 4 chunks of 16 files per thread, and kept each
+file's whole result until the caller took it. Searching 100 files of 4096
+lines of `e` × 63 for `e`, with output to `/dev/null` (peak memory, whole
+process):
+
+| Version | Peak memory |
+|---------|------:|
+| One thread (stage 2) | 54 MiB |
+| The pool, as first committed | 1342 MiB |
+| The pool, with all three limits below | 213 MiB |
+| With only the 32 MiB budget | 599 MiB |
+| With only chunks sized by result size | 319 MiB |
+
+The pool now keeps results the caller hasn't taken to about 32 MiB, sizes
+each chunk from the result size per file seen so far (16 files normally,
+down to 1), and starts with one 1-file chunk per thread, until there's a
+size to go by. The rest of the 213 MiB is each of 8 threads holding one
+file's matches while it works on it. The speed of the benchmark queries
+didn't change.
+
 ### Targets
 
-Set from these numbers, for this machine and these repos. A change that
-misses one should say why.
+Set from the "after" numbers of this milestone, with room to spare, for this
+machine and these repos. The baseline was far slower, so targets based on it
+would say nothing about keeping these gains. A change that misses one should
+say why.
 
 | What | Target |
 |------|--------|
@@ -238,14 +280,14 @@ misses one should say why.
 | Warm search, first result or `--max-results 10` | under 2 ms |
 | Fresh-process search, rare, missing and long groups | p95 under 10 ms |
 | Fresh-process search, common group | p50 under 100 ms |
-| Building go | under 1.0 s, peak memory under 3 times its content (325 MiB) |
+| Building go | under 1.0 s, peak memory under 3 times its content (324 MiB) |
 | No-op update | under 50 ms |
 | Searches during an update | p50 at most 30% slower than without |
 
 ### Limits
 
 - One machine, warm cache, one run of each script.
-- 40 queries is few; a p95 over 6 queries is about the slowest one.
+- 40 queries is few; a p95 over 6 queries is the slowest one.
 - The fresh-process numbers include printing the results to a pipe that
   Python reads, which is slower than writing to a file.
 

@@ -538,7 +538,7 @@ result never has to sit in memory:
       │            every matching file
       ▼  for each repo, on the calling thread
  ┌──────────────────────────────────────────────────────────────┐
- │ candidates = run(TrigramQuery), split into chunks of 16      │
+ │ candidates = run(TrigramQuery), handed out in chunks         │
  └───────────────────────────────┬──────────────────────────────┘
                                  ▼  each chunk, on the thread pool
  ┌──────────────────────────────────────────────────────────────┐
@@ -555,9 +555,19 @@ Searches use one pool of threads (one per core, at most 8). The calling
 thread finds every repo's candidates first, which takes well under a
 millisecond. The pool's threads then check the files in chunks, and the
 calling thread passes the chunks on in order. So results come out in the same
-order as with one thread, and the limit cuts them at the same place. At most 4
-chunks per thread are in flight, so a slow reader of the results keeps memory
-small. Damage found in a repo is reported when the results get to it.
+order as with one thread, and the limit cuts them at the same place.
+
+Memory stays bounded however slowly the results are read:
+
+- At most 4 chunks per thread are in flight.
+- Results not taken yet are kept to about 32 MiB. Each chunk's size (16
+  files, down to 1) comes from the result size per file seen so far, and the
+  first chunk on each thread has 1 file, to find out.
+- With a limit, a file's result never has more lines than the limit.
+
+Damage found in a repo, and cancelling, show up when the results get there,
+as with one thread. On a machine with one core, or if the threads can't be
+started, the search runs on the calling thread.
 
 ### Why we keep the whole query
 
@@ -739,7 +749,8 @@ code-search/
 │   ├── integration/            Git to search, start to finish
 │   ├── fuzz/                   index reader, query parser
 │   └── support/                brute-force search, temp Git repos, a fake `git` for broken output
-├── benchmarks/                 search_bench, run_benchmarks.py, repos.tsv, queries.tsv
+├── benchmarks/                 search_bench, run_benchmarks.py, repos.tsv, queries.tsv,
+│                               index_bench, storage_experiment (M2.5)
 └── docs/
 ```
 

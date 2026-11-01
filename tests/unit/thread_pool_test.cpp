@@ -35,5 +35,16 @@ TEST(ThreadPool, TooManyThreadsIsAnError) {
 #endif
 }
 
+// Search and build fall back to the calling thread rather than fail.
+TEST(StartPool, GivesNoPoolForOneThreadOrWhenThreadsRunOut) {
+    EXPECT_EQ(startPool(1), nullptr);
+    const std::unique_ptr<ThreadPool> pool = startPool(3);
+    ASSERT_NE(pool, nullptr);
+    EXPECT_EQ(pool->size(), 3U);
+#if defined(__APPLE__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
+    EXPECT_EQ(startPool(100000), nullptr);  // over macOS's 4096 threads per process
+#endif
+}
+
 }  // namespace
 }  // namespace codesearch

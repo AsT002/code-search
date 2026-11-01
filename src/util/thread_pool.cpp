@@ -1,6 +1,7 @@
 #include "codesearch/util/thread_pool.hpp"
 
 #include <algorithm>
+#include <system_error>
 #include <utility>
 
 namespace codesearch {
@@ -63,6 +64,17 @@ void ThreadPool::work() {
             tasks_.pop_front();
         }
         task();
+    }
+}
+
+std::unique_ptr<ThreadPool> startPool(std::size_t threads) {
+    if (threads <= 1) {
+        return nullptr;
+    }
+    try {
+        return std::make_unique<ThreadPool>(threads);
+    } catch (const std::system_error&) {
+        return nullptr;  // out of threads; run on the calling thread instead
     }
 }
 

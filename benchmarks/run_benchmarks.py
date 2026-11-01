@@ -35,14 +35,28 @@ def read_tsv(path):
     return rows
 
 
+def head_of(checkout):
+    done = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"], capture_output=True, text=True)
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 def clone(url, commit, dest):
+    """Makes dest a checkout of commit. Checks one that's already there."""
     if dest.exists():
+        if head_of(dest) != commit:
+            sys.exit(f"{dest} isn't a checkout of {commit}. Remove it to clone it again")
         return
-    dest.mkdir(parents=True)
-    git = ["git", "-C", str(dest)]
+    # Clone next to it, and rename only once it's complete, so a clone that
+    # fails partway never looks finished to the next run.
+    partial = dest.with_name(dest.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    partial.mkdir(parents=True)
+    git = ["git", "-C", str(partial)]
     subprocess.run(git + ["init", "-q"], check=True)
     subprocess.run(git + ["fetch", "-q", "--depth", "1", url, commit], check=True)
     subprocess.run(git + ["checkout", "-q", "FETCH_HEAD"], check=True)
+    partial.rename(dest)
 
 
 def timed_peak(cmd, env):
@@ -63,6 +77,10 @@ def timed_peak(cmd, env):
 def run_stream(cmd, env=None, cwd=None):
     """Runs cmd, reading all its output. Returns (s to first byte, s to end).
 
+    The programs write to a pipe in blocks (16 KiB for code-search), so the
+    first byte arrives when the first block is full or the program ends:
+    "first output", not the time to the first result.
+
     Exit code 1 means nothing was found, for code-search, rg and git grep
     alike. Anything above that is a failure, not a timing, so it raises.
     """
@@ -82,17 +100,43 @@ def run_stream(cmd, env=None, cwd=None):
     return (first if first is not None else total), total
 
 
+# Words that are filters when typed before a ':', as in the query parser.
+FILTERS = ("repo", "path", "file", "lang", "case")
+
+
+def unquote(inner):
+    """The text of one quoted part, without its quotes, or None if there's
+    another quote in it (like '"a" "b"', which is two words). Inside quotes,
+    \\" and \\\\ stand for " and \\; other backslashes stay."""
+    out = []
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if c == '"':
+            return None
+        if c == "\\" and i + 1 < len(inner) and inner[i + 1] in '"\\':
+            out.append(inner[i + 1])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def plain_text(query):
-    """The literal text of a query that is just one literal, or None."""
+    """(text, case-sensitive) for a query that is just one literal, or None."""
     case_sensitive = False
     if query.startswith("case:yes "):
         case_sensitive = True
         query = query[len("case:yes "):]
     if len(query) >= 2 and query.startswith('"') and query.endswith('"'):
-        return query[1:-1].replace('\\"', '"').replace("\\\\", "\\"), case_sensitive
-    if re.fullmatch(r"[^\s\"\\()\-][^\s\"\\()]*", query) and ":" not in query and query not in ("or", "OR"):
-        return query, case_sensitive
-    return None
+        text = unquote(query[1:-1])
+        return (text, case_sensitive) if text else None
+    if not re.fullmatch(r"[^\s\"\\()\-][^\s\"\\()]*", query) or query in ("or", "OR"):
+        return None
+    if ":" in query and query.split(":", 1)[0] in FILTERS:
+        return None  # a filter like lang:go, not text
+    return query, case_sensitive
 
 
 def ms(seconds):
@@ -169,7 +213,7 @@ def bench_search(cs, queries, repos, repo_dir, env, runs):
                      ms(rg_all) if rg_all else "", ms(gg_all) if gg_all else ""])
 
     print(f"### Fresh-process searches (ms, median of {runs} runs)\n")
-    table(["Group", "Query", "First result", "All", "rg", "git grep"], rows)
+    table(["Group", "Query", "First output", "All", "rg", "git grep"], rows)
 
     group_rows = []
     for group, values in by_group.items():
@@ -178,7 +222,7 @@ def bench_search(cs, queries, repos, repo_dir, env, runs):
             return f"{ms(percentile(vs, 0.5))} / {ms(percentile(vs, 0.95))}" if vs else ""
         group_rows.append([group, str(len(values)), col(0), col(1), col(2), col(3)])
     print("### Fresh-process groups (ms, p50 / p95)\n")
-    table(["Group", "Queries", "First result", "All", "rg", "git grep"], group_rows)
+    table(["Group", "Queries", "First output", "All", "rg", "git grep"], group_rows)
 
 
 def bench_during_update(cs, queries, repos, env, runs):
@@ -191,6 +235,7 @@ def bench_during_update(cs, queries, repos, env, runs):
     quiet = [statistics.median(ts) for ts in zip(*[search_all() for _ in range(runs)])]
     largest = repos[-1][0]
     stop = Path(env["CODE_SEARCH_HOME"]) / "stop-rebuilding"
+    stop.unlink(missing_ok=True)  # left over from a run that was stopped
     # The loop stops with exit code 1 as soon as an update fails: searches
     # timed next to a failing update would say nothing about a real one.
     loop = subprocess.Popen(

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -48,5 +49,11 @@ private:
 // How many threads a pool should have on this machine: one per core, at
 // most 8. More than that rarely helps, since reading memory becomes the limit.
 std::size_t defaultThreadCount();
+
+// A pool for searches and builds, or nullptr. With one thread, a pool
+// would only add handing the work over. And if the system can't start the
+// threads, the work can still run on the calling thread. Code that takes a
+// ThreadPool* does that when given nullptr.
+std::unique_ptr<ThreadPool> startPool(std::size_t threads = defaultThreadCount());
 
 }  // namespace codesearch

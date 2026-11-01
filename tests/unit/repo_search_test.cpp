@@ -9,6 +9,7 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <new>
 #include <string>
@@ -39,7 +40,8 @@ std::atomic<std::thread::id> gMainThread;
 // NOLINTEND(*-avoid-non-const-global-variables)
 
 // How big the block really is, so delete can count it off again.
-std::size_t blockSize(const void* memory) {
+// Not const void*: glibc's malloc_usable_size takes a plain void*.
+std::size_t blockSize(void* memory) {  // NOLINT(misc-const-correctness)
 #ifdef __APPLE__
     return malloc_size(memory);
 #else
@@ -417,6 +419,115 @@ TEST(SearchReposOnAPool, LimitBoundsWhatIsKept) {
     gCounting = false;
     EXPECT_EQ(status, SearchStatus::Truncated);
     EXPECT_LT(gPeak - before, std::size_t{4} << 20U) << "most bytes live at once";
+}
+
+// Without a limit, results waiting for the caller are kept to about
+// 32 MiB. Before, the pool took on 256 files at once and held all their
+// results: here about 200 MiB, while one thread needs a few. The caller
+// is slow to take the first result, like a terminal printing a lot, so the
+// pool gets ahead as far as it's allowed to.
+TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
+    IndexBuilder builder;
+    std::string content;
+    for (int n = 0; n < 1024; ++n) {
+        content += std::string(31, 'e') + "\n";
+    }
+    for (int i = 0; i < 128; ++i) {
+        builder.add("f" + std::to_string(i), content);
+    }
+    const MemoryIndex index = builder.build();
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("e");
+    request.pool = &pool;
+
+    std::size_t files = 0;
+    const std::size_t before = gLive;
+    gPeak = before;
+    gCounting = true;
+    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& /*file*/) {
+        if (++files == 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+    });
+    gCounting = false;
+    EXPECT_EQ(status, SearchStatus::Complete);
+    EXPECT_EQ(files, 128U);
+    EXPECT_LT(gPeak - before, std::size_t{64} << 20U) << "most bytes live at once";
+}
+
+// Cancelled partway through the last chunk, before any file in it matched:
+// files were left unchecked, so the search is cancelled, not complete.
+TEST(SearchReposOnAPool, CancelPartwayThroughTheLastChunk) {
+    // Each file has every trigram of "needle", but only the last two have
+    // the text. The pool's first chunks get one file each (one per thread),
+    // so the third file starts a bigger chunk: the last one.
+    IndexBuilder builder;
+    builder.add("a", "needlx eedle");
+    builder.add("b", "needlx eedle");
+    builder.add("c", "needlx eedle");
+    builder.add("d", "needle");
+    builder.add("e", "needle");
+    const MemoryIndex inner = builder.build();
+    std::atomic<bool> cancelled = false;
+    // Reading the third file cancels the search, as Ctrl-C at that moment
+    // would. It waits a moment first, so the caller is already waiting for
+    // that chunk.
+    class CancelOnFirstRead : public CountingIndex {
+    public:
+        CancelOnFirstRead(const IndexReader& index, std::atomic<bool>& cancel)
+            : CountingIndex(index), cancel_(&cancel) {}
+        void withContent(DocId doc,
+                         const std::function<void(std::string_view)>& fn) const override {
+            if (doc == 2) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                *cancel_ = true;
+            }
+            CountingIndex::withContent(doc, fn);
+        }
+
+    private:
+        std::atomic<bool>* cancel_;
+    };
+    const CancelOnFirstRead index(inner, cancelled);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(2);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "pool");
+        cancelled = false;
+        SearchRequest request;
+        request.query = literal("needle");
+        request.cancelled = &cancelled;
+        request.pool = threads;
+        SearchStatus status = SearchStatus::Complete;
+        EXPECT_TRUE(found(targets, request, &status).empty());
+        EXPECT_EQ(status, SearchStatus::Cancelled);
+    }
+}
+
+// Cancelling while the last result is handled leaves nothing undone, so the
+// search is complete, the same as on one thread.
+TEST(SearchReposOnAPool, CancelDuringTheLastResultIsComplete) {
+    const MemoryIndex index = manyFiles(2);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(2);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "pool");
+        std::atomic<bool> cancelled = false;
+        SearchRequest request;
+        request.query = literal("needle");
+        request.cancelled = &cancelled;
+        request.pool = threads;
+        std::size_t files = 0;
+        const SearchStatus status = searchRepos(targets, request, [&](const ResultFile&) {
+            if (++files == 2) {
+                cancelled = true;
+            }
+        });
+        EXPECT_EQ(files, 2U);
+        EXPECT_EQ(status, SearchStatus::Complete);
+    }
 }
 
 // If a pool thread runs out of memory partway through a file, the search

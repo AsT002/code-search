@@ -100,6 +100,9 @@ std::size_t firstFullMatch(const Hits& hits, std::size_t i, const MatchesAt& mat
 }  // namespace
 
 std::size_t LiteralMatcher::find(std::string_view text, std::size_t from) const {
+    if (pattern_.empty()) {
+        return std::string_view::npos;  // matches nothing, as for findAll
+    }
     // memchr, which string_view::find uses, jumps quickly from one copy of
     // the first byte to the next. That wins when the byte is rare, so only
     // patterns starting with a common byte go to the filter below. (Measured

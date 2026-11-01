@@ -278,7 +278,8 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   during an update.
 - The first profile showed that finding candidates takes under 0.3 ms for
   every query. The time went to checking files: the case-insensitive literal
-  search (55%), building result lines (22%) and counting lines (10%). So the
+  search (55%), building result lines (22%), and `locate` and the search
+  loop (10%). So the
   biggest wins weren't on the plan's list:
   - `LiteralMatcher::find` tests 32 start positions per step for the
     pattern's first and last bytes, in a loop the compiler vectorizes.
@@ -299,6 +300,14 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
     without its trigrams isn't scanned for it.
   - bitmaps and direct scans weren't built: finding candidates is at most
     0.3 ms, so there's nothing for them to win.
+- Reviews after M7 found more in the parallel search, all fixed with
+  tests: a limited search made every result line of the files it read
+  ahead; damage or cancelling in a chunk could hide earlier results or give
+  the wrong status; a task that couldn't be queued hung the cleanup; and
+  without a limit the pool could hold the results of hundreds of files
+  (1.3 GB where one thread used 54 MiB). It now keeps them to about 32 MiB.
+  When a pool can't be started, or there's one core, searches and builds
+  run on the calling thread.
 - The first version of the parallel search had a race: a task signaled the
   condition variable after letting go of the lock, so the search could be
   destroyed first. The differential test hung on it now and then. Tasks now
