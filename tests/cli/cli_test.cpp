@@ -8,6 +8,7 @@
 
 #include "../support/temp_dir.hpp"
 #include "../support/temp_repo.hpp"
+#include "codesearch/app/repo_manager.hpp"
 #include "codesearch/index/shard_format.hpp"
 #include "codesearch/util/process.hpp"
 
@@ -102,8 +103,10 @@ TEST(Cli, BadArgumentsPrintUsage) {
     const std::vector<std::vector<std::string>> cases = {
         {},
         {"search"},
-        {"search", "--path"},                            // --path without a value
-        {"search", "--repo"},                            // --repo without a value
+        {"search", "--path"},           // --path without a value
+        {"search", "--repo"},           // --repo without a value
+        {"search", "--repo", "", "a"},  // empty values would mean "all"
+        {"search", "--path", "", "a"},
         {"search", "--path", ".", "one", "two"},         // two texts
         {"search", "--path", ".", "--", "a", "b"},       // more after "--" text
         {"search", "--path", ".", "--", "a", "--path"},  // same
@@ -116,8 +119,9 @@ TEST(Cli, BadArgumentsPrintUsage) {
         {"search", "--index", "x", "a"},         // gone in M4
         {"index", "--path", ".", "--out", "x"},  // gone in M4
         {"add"},
-        {"add", "--name", "x"},                      // no source
-        {"add", ".", "--name"},                      // --name without a value
+        {"add", "--name", "x"},  // no source
+        {"add", ".", "--name"},  // --name without a value
+        {"add", ".", "--name", ""},
         {"add", ".", "other"},                       // two sources
         {"add", ".", "--name", "a", "--name", "b"},  // two names
         {"add", "--bogus"},
@@ -189,6 +193,23 @@ TEST(CliErrors, ClosedOutputIsAnError) {
     EXPECT_EQ(exitCode, 2);
     EXPECT_TRUE(contains(search.errorOutput(), "could not write the output"))
         << search.errorOutput();
+}
+
+// Started with stdin closed, like from some schedulers and daemons. Our
+// pipes to Git must not end up as fd 0.
+TEST(CliErrors, WorksWithStdinClosed) {
+    TempRepo repo;
+    fillRepo(repo);
+    // "0<&-" makes the shell close stdin before it runs the program.
+    const std::vector<std::string> args = {
+        "-c",
+        R"(exec "$0" search --path "$1" Target 0<&-)",
+        CODE_SEARCH_BIN,
+        repo.dir().string(),
+    };
+    const ProcessResult result = runProcess("sh", args);
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "a.txt:2:8:second Target line\nflags.sh:1:15:run --flag -> target\n");
 }
 
 // ---- Query language and output ----
@@ -489,6 +510,40 @@ TEST(CliRepos, VerifyChecksTheIndex) {
     result = codeSearch({"verify", "nope"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
+}
+
+// Another repo's index copied over demo's opens fine and passes the full
+// check, but it isn't demo's index. Search and verify must say so, not
+// show the other repo's files as demo's.
+TEST(CliRepos, AnIndexThatDoesntMatchTheRegistryIsAnError) {
+    TempRepo demo;
+    fillRepo(demo);
+    TempRepo other;
+    other.write("other.txt", "other target\n");
+    other.commit();
+    const TempDir home;
+    addRepo(home, demo, "demo");
+    addRepo(home, other, "other");
+    const Registry registry = loadRegistry(Workspace(home.dir()));
+    const std::filesystem::path indexes = home.dir() / "indexes";
+    std::filesystem::copy_file(indexes / registry.find("other")->index.file,
+                               indexes / registry.find("demo")->index.file,
+                               std::filesystem::copy_options::overwrite_existing);
+
+    ProcessResult result = codeSearch({"verify", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 1);
+    EXPECT_TRUE(contains(result.err, "the index file doesn't match the registry")) << result.err;
+    result = codeSearch({"search", "target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err,
+                         "demo: the index file doesn't match the registry. Rebuild "
+                         "it with: code-search update demo --rebuild"))
+        << result.err;
+    EXPECT_FALSE(contains(result.out, "demo:other.txt")) << result.out;
+
+    result = codeSearch({"update", "demo"}, home.dir());
+    EXPECT_TRUE(contains(result.out, "the index file doesn't match the registry")) << result.out;
+    EXPECT_EQ(codeSearch({"verify", "demo"}, home.dir()).exitCode, 0);
 }
 
 TEST(CliRepos, DamageFoundWhileSearchingNamesTheFix) {

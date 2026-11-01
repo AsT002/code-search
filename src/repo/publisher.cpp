@@ -66,16 +66,20 @@ void removeAllExcept(const std::filesystem::path& dir, const std::set<std::strin
 }
 
 // Deletes the "registry.json.tmp-XXXXXX" files AtomicFile makes while saving
-// the registry. One is left behind only if a save was killed partway.
-void removeRegistryTempFiles(const Workspace& workspace) {
+// the registry. One is left behind only if a save was killed partway. Also
+// deletes "code-search-workspace.tmp-XXXXXX", which an earlier version left
+// the same way when it wrote the marker file with AtomicFile.
+void removeRootTempFiles(const Workspace& workspace) {
     if (!std::filesystem::exists(workspace.root())) {
         return;
     }
-    const std::string prefix = workspace.registryFile().filename().string() + ".tmp-";
+    const std::string registryPrefix = workspace.registryFile().filename().string() + ".tmp-";
+    const std::string markerPrefix = workspace.markerFile().filename().string() + ".tmp-";
     std::vector<std::filesystem::directory_entry> doomed;
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(workspace.root())) {
-        if (entry.path().filename().string().starts_with(prefix)) {
+        const std::string name = entry.path().filename().string();
+        if (name.starts_with(registryPrefix) || name.starts_with(markerPrefix)) {
             doomed.push_back(entry);
         }
     }
@@ -118,7 +122,7 @@ void cleanUp(const Workspace& workspace, const Registry& registry) {
     removeAllExcept(workspace.tmpDir(), {}, isBuildFile);
     removeAllExcept(workspace.indexesDir(), indexFiles, isIndexFile);
     removeAllExcept(workspace.reposDir(), clones, isClone);
-    removeRegistryTempFiles(workspace);
+    removeRootTempFiles(workspace);
 }
 
 }  // namespace codesearch

@@ -30,8 +30,8 @@ std::filesystem::path writeToTmp(const Workspace& workspace, const MemoryIndex& 
 void moveIntoIndexes(const Workspace& workspace, const std::filesystem::path& tmpFile);
 
 // Deletes builds left in tmp/, index files `registry` doesn't name, clones
-// of repos it doesn't list, and temp files a killed registry save left next
-// to registry.json. Only names code-search makes are deleted (like
+// of repos it doesn't list, and temp files a killed save left next to
+// registry.json. Only names code-search makes are deleted (like
 // "r_1c2d3e4f-g0001.idx" and "r_1c2d3e4f.git"); anything else in the
 // folders is left alone. It first checks the three folders are real folders inside
 // the workspace (Workspace::checkFolders). It only deletes things directly

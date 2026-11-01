@@ -115,6 +115,9 @@ bool readFlag(std::string_view arg, SearchArgs& result) {
 // Sets a search option that takes a value, like --repo <name>. Returns false
 // if `arg` isn't one, or the value is wrong.
 bool readOption(std::string_view arg, std::string_view value, SearchArgs& result) {
+    if ((arg == "--repo" || arg == "--path") && value.empty()) {
+        return false;  // an empty name or path would mean "every repo"
+    }
     if (arg == "--repo") {
         result.repoName = value;
     } else if (arg == "--path") {
@@ -178,7 +181,9 @@ std::optional<AddArgs> parseAddArgs(std::span<char*> args) {
     AddArgs result;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view arg = args[i];
-        if (arg == "--name" && i + 1 < args.size() && result.name.empty()) {
+        // An empty --name would quietly mean the default name.
+        if (arg == "--name" && i + 1 < args.size() && result.name.empty() &&
+            !std::string_view(args[i + 1]).empty()) {
             ++i;
             result.name = args[i];
         } else if (result.source.empty() && !arg.starts_with('-') && !arg.empty()) {
@@ -474,6 +479,9 @@ int runVerify(const std::string& name) {
     try {
         const ShardReader reader(path);
         reader.verify();
+        if (!matchesRegistry(reader, repo->index)) {
+            throw IndexFileError("the index file doesn't match the registry");
+        }
         std::cout << name << ": ok, " << reader.docCount() << " files, "
                   << reader.header().trigramCount << " trigrams, commit " << reader.commit().hex()
                   << '\n';

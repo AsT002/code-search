@@ -119,10 +119,7 @@ std::string whyRebuild(const Workspace& workspace, const IndexInfo& current,
     }
     try {
         const ShardReader reader(workspace.indexesDir() / current.file);
-        const ShardHeader& header = reader.header();
-        if (reader.commit() != current.commit || header.formatVersion != current.formatVersion ||
-            header.policyVersion != current.policyVersion ||
-            header.configFingerprint != current.configFingerprint) {
+        if (!matchesRegistry(reader, current)) {
             return "the index file doesn't match the registry";
         }
     } catch (const std::runtime_error& error) {
@@ -309,6 +306,13 @@ RepoEntry RepoManager::remove(const std::string& name) {
     return removed;
 }
 
+bool matchesRegistry(const ShardReader& reader, const IndexInfo& info) {
+    const ShardHeader& header = reader.header();
+    return reader.commit() == info.commit && header.formatVersion == info.formatVersion &&
+           header.policyVersion == info.policyVersion &&
+           header.configFingerprint == info.configFingerprint;
+}
+
 std::string rebuildHint(const std::string& name) {
     return ". Rebuild it with: code-search update " + name + " --rebuild";
 }
@@ -316,6 +320,35 @@ std::string rebuildHint(const std::string& name) {
 Registry loadRegistry(const Workspace& workspace) {
     return JsonRegistryStore(workspace.registryFile()).load();
 }
+
+namespace {
+
+// Opens `repo`'s current index file and checks it matches the registry.
+// Returns nullptr if the file is gone and `mayBeGone` is set: the registry
+// changed after we read it. Throws IndexFileError naming the repo if the
+// file is damaged or doesn't match.
+std::unique_ptr<ShardReader> openIndex(const Workspace& workspace, const RepoEntry& repo,
+                                       bool mayBeGone) {
+    const std::filesystem::path path = workspace.indexesDir() / repo.index.file;
+    std::unique_ptr<ShardReader> reader;
+    try {
+        reader = std::make_unique<ShardReader>(path);
+    } catch (const IndexFileError& error) {
+        throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
+    } catch (const std::runtime_error&) {
+        if (mayBeGone && !std::filesystem::exists(path)) {
+            return nullptr;
+        }
+        throw;
+    }
+    if (!matchesRegistry(*reader, repo.index)) {
+        throw IndexFileError(repo.name + ": the index file doesn't match the registry" +
+                             rebuildHint(repo.name));
+    }
+    return reader;
+}
+
+}  // namespace
 
 std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query) {
     for (int attempt = 1;; ++attempt) {
@@ -332,19 +365,12 @@ std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& que
             if (resolveRepo(query, repo.name) == constant(false)) {
                 continue;  // nothing in this repo can match
             }
-            const std::filesystem::path path = workspace.indexesDir() / repo.index.file;
-            try {
-                opened.push_back(
-                    OpenRepo{.name = repo.name, .index = std::make_unique<ShardReader>(path)});
-            } catch (const IndexFileError& error) {
-                throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
-            } catch (const std::runtime_error&) {
-                if (attempt == 1 && !std::filesystem::exists(path)) {
-                    fileWentAway = true;
-                    break;
-                }
-                throw;
+            std::unique_ptr<ShardReader> reader = openIndex(workspace, repo, attempt == 1);
+            if (reader == nullptr) {
+                fileWentAway = true;
+                break;
             }
+            opened.push_back(OpenRepo{.name = repo.name, .index = std::move(reader)});
         }
         if (!fileWentAway) {
             return opened;

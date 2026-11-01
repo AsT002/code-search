@@ -1,10 +1,9 @@
 #include "codesearch/repo/workspace.hpp"
 
 #include <cstdlib>
+#include <fstream>
 #include <stdexcept>
 #include <string_view>
-
-#include "codesearch/util/atomic_file.hpp"
 
 namespace codesearch {
 
@@ -43,9 +42,11 @@ void Workspace::create() const {
     // create_directories does nothing for folders that already exist.
     std::filesystem::create_directories(root_);
     // The marker goes in first, so the folder is never left with our files
-    // in it but no marker.
+    // in it but no marker. It's written in place, not with AtomicFile: it
+    // exists as soon as it's opened, so even a write killed halfway leaves
+    // it there. Only its name matters, never its text.
     if (!std::filesystem::exists(markerFile())) {
-        writeFileAtomically(markerFile(), kMarkerText);
+        std::ofstream(markerFile()) << kMarkerText;
     }
     std::filesystem::create_directories(reposDir());
     std::filesystem::create_directories(indexesDir());
@@ -64,14 +65,19 @@ void Workspace::checkRoot() const {
     if (std::filesystem::exists(markerFile()) || std::filesystem::exists(registryFile())) {
         return;
     }
-    // A default-constructed directory_iterator is the end of any folder, so
-    // this checks the folder has nothing in it.
-    if (std::filesystem::directory_iterator(root_) == std::filesystem::directory_iterator()) {
-        return;
+    // Empty, apart from what an earlier version left if it was killed while
+    // writing the marker with AtomicFile: "code-search-workspace.tmp-XXXXXX".
+    // Cleanup deletes those.
+    const std::string leftover = markerFile().filename().string() + ".tmp-";
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root_)) {
+        if (!entry.path().filename().string().starts_with(leftover)) {
+            throw std::runtime_error(
+                root_.string() +
+                " already has files in it, and isn't a code-search folder. Set "
+                "CODE_SEARCH_HOME to a new or empty folder");
+        }
     }
-    throw std::runtime_error(root_.string() +
-                             " already has files in it, and isn't a code-search folder. Set "
-                             "CODE_SEARCH_HOME to a new or empty folder");
 }
 
 void Workspace::checkFolders() const {

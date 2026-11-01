@@ -230,6 +230,9 @@ It must be missing, empty, or already a workspace (it has
 `code-search-workspace`, or `registry.json` for workspaces made before the
 marker). Otherwise `add`, `update` and `remove` refuse to start, so pointing
 `$CODE_SEARCH_HOME` at a folder like `~` can't hand its `tmp/` to cleanup.
+The marker is the first thing written, and it's written in place rather than
+through a temp file, so a first `add` killed at any point leaves a folder that
+the next one accepts.
 
 - Files and folders are named by internal IDs like `r_7f3a90b1` (8 random hex
   digits). The name a user gives
@@ -246,6 +249,9 @@ marker). Otherwise `add`, `update` and `remove` refuse to start, so pointing
   or `--absolute-git-dir` for a bare repo). Git finds a repo from any folder
   inside it, so a subfolder would index the whole repo, and the same repo could
   be added twice under two names.
+- Search and `verify` check that an index file's header matches its registry
+  entry (commit, format, filter rules and settings). A valid index of another
+  repo copied over it is reported as not matching, not searched as this repo.
 - Every Git we start runs without the variables `git rev-parse --local-env-vars`
   lists, like `GIT_DIR` and `GIT_WORK_TREE`. Git sets them for hooks and
   aliases, and they would override `-C` and `--git-dir`.

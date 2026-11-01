@@ -198,6 +198,25 @@ TEST(Workspace, TakesANewOrEmptyFolderOrAnOldWorkspace) {
     EXPECT_TRUE(std::filesystem::exists(old.markerFile()));
 }
 
+// A first add killed while it writes the marker must not lock the folder
+// out. Now the marker is written in place, so a kill leaves it empty or cut
+// short. An earlier version left a "code-search-workspace.tmp-XXXXXX" instead.
+TEST(Workspace, RecoversFromAKilledFirstAdd) {
+    const TempDir dir;
+    const Workspace cutShort(dir.file("cut"));
+    std::filesystem::create_directories(cutShort.root());
+    writeFile(cutShort.markerFile(), "");
+    EXPECT_NO_THROW(cutShort.create());
+
+    const Workspace older(dir.file("older"));
+    std::filesystem::create_directories(older.root());
+    writeFile(older.root() / "code-search-workspace.tmp-a1B2c3", "half written");
+    older.create();
+    cleanUp(older, Registry{});
+    EXPECT_EQ(namesIn(older.root()),
+              (std::set<std::string>{"code-search-workspace", "indexes", "repos", "tmp"}));
+}
+
 TEST(Publisher, CleanUpWithoutFoldersDoesNothing) {
     const TempDir dir;
     EXPECT_NO_THROW(cleanUp(Workspace(dir.file("ws")), Registry{}));

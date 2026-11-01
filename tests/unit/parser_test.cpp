@@ -51,6 +51,10 @@ TEST(Parser, MinusExcludes) {
 TEST(Parser, QuotesAndBackslashes) {
     EXPECT_EQ(parsed("\"foo bar\""), literal("foo bar"));
     EXPECT_EQ(parsed("\"or\""), literal("or"));
+    // Text that's "or" once quotes and escapes are gone is still text.
+    EXPECT_EQ(parsed("a or\"\" b"), allOf({literal("a"), literal("or"), literal("b")}));
+    EXPECT_EQ(parsed("a o\\r b"), allOf({literal("a"), literal("or"), literal("b")}));
+    EXPECT_EQ(parsed("a \"\"OR b"), allOf({literal("a"), literal("OR"), literal("b")}));
     EXPECT_EQ(parsed("\"-x\""), literal("-x"));
     EXPECT_EQ(parsed(R"("say \"hi\" \\ \d")"), literal(R"(say "hi" \ \d)"));
     EXPECT_EQ(parsed("pre\"fix mid\"dle"), literal("prefix middle"));  // joined like a shell

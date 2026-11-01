@@ -84,6 +84,12 @@ private:
 // user how to rebuild it.
 std::string rebuildHint(const std::string& name);
 
+// True if the header of the open index file says what the registry says
+// about it: the same commit, format, filter rules and settings. A file that
+// opens fine can still be the wrong one, like another repo's index copied
+// over it.
+bool matchesRegistry(const ShardReader& reader, const IndexInfo& info);
+
 // The registry as it is now. Doesn't take the lock.
 Registry loadRegistry(const Workspace& workspace);
 
@@ -98,7 +104,8 @@ struct OpenRepo {
 // change runs. If an index file was deleted between reading the registry and
 // opening the file, the registry changed: read it again and retry once.
 // Throws std::runtime_error if the query names a repo that isn't added, and
-// IndexFileError (naming the repo) if an index is damaged.
+// IndexFileError (naming the repo) if an index is damaged or doesn't match
+// the registry (matchesRegistry).
 std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query);
 
 }  // namespace codesearch

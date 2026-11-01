@@ -30,6 +30,9 @@ struct Token {
     // in quotes or after a backslash. A filter name must be typed plainly, so
     // "path:x" in quotes is just text.
     std::size_t plainPrefix = 0;
+    // For Word: nothing in it was quoted or escaped. Only a plain "or" is
+    // the keyword, so or"" and o\r are text, even though their text is "or".
+    bool plain = true;
 };
 
 bool isSpace(char c) {
@@ -65,7 +68,7 @@ void readQuoted(std::string_view input, std::size_t& pos, std::string& out) {
 // ')' that closes it, so "printf(" and "f(x)" are words. Any other ')' ends
 // the word and closes a group.
 Token readWord(std::string_view input, std::size_t& pos) {
-    Token token{.kind = TokenKind::Word, .text = "", .plainPrefix = 0};
+    Token token{.kind = TokenKind::Word, .text = "", .plainPrefix = 0, .plain = true};
     bool allPlain = true;  // nothing quoted or escaped so far
     int openParens = 0;
     while (pos < input.size()) {
@@ -99,6 +102,7 @@ Token readWord(std::string_view input, std::size_t& pos) {
             token.plainPrefix = token.text.size();
         }
     }
+    token.plain = allPlain;
     return token;
 }
 
@@ -135,8 +139,7 @@ std::vector<Token> tokenize(std::string_view input) {
             }
         }
         Token word = readWord(input, pos);
-        const bool plain = word.plainPrefix == word.text.size();
-        if (plain && !afterNot && (word.text == "or" || word.text == "OR")) {
+        if (word.plain && !afterNot && (word.text == "or" || word.text == "OR")) {
             word.kind = TokenKind::Or;
         }
         tokens.push_back(std::move(word));

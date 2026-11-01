@@ -45,11 +45,37 @@ struct Pipe {
         }
         readEnd = fds[0];
         writeEnd = fds[1];
+        if (!moveAboveStdio(readEnd) || !moveAboveStdio(writeEnd)) {
+            const int error = errno;
+            closeFd(readEnd);
+            closeFd(writeEnd);
+            throw ProcessError("could not move a pipe: " + errorText(error));
+        }
         // Close-on-exec: other programs we start later must not get this
         // pipe, or the child would never see the end of its input.
         ::fcntl(readEnd, F_SETFD, FD_CLOEXEC);   // NOLINT(cppcoreguidelines-pro-type-vararg)
         ::fcntl(writeEnd, F_SETFD, FD_CLOEXEC);  // NOLINT(cppcoreguidelines-pro-type-vararg)
     }
+
+    // If we were started with stdin, stdout or stderr closed, pipe() can
+    // hand out fd 0, 1 or 2. Then dup2-ing it onto the same number does
+    // nothing, close-on-exec stays set, and the child starts with that
+    // stream closed. So a pipe end below 3 is moved to a free fd from 3 up.
+    // Returns false if that fails, leaving `fd` as it was.
+    static bool moveAboveStdio(int& fd) {
+        if (fd > STDERR_FILENO) {
+            return true;
+        }
+        // F_DUPFD copies the fd to the lowest free number that's at least 3.
+        const int moved = ::fcntl(fd, F_DUPFD, STDERR_FILENO + 1);  // NOLINT(*-vararg)
+        if (moved < 0) {
+            return false;
+        }
+        ::close(fd);
+        fd = moved;
+        return true;
+    }
+
     ~Pipe() {
         closeFd(readEnd);
         closeFd(writeEnd);
