@@ -127,12 +127,20 @@ using TrigramQuery =
     std::variant<AllQuery, NoneQuery, TrigramTerm, AndQuery, OrQuery>;
 
 // search/
-// M1 has LiteralMatcher only. A shared Matcher base class arrives with
-// RegexMatcher in M8.
+// Two matchers with the same calls. No shared base class: the evaluator
+// knows which one each part of the query has, so it never needs one.
 class LiteralMatcher {
 public:
     LiteralMatcher(std::string_view pattern, bool caseSensitive);
     // Calls onMatch for each match. Return false from onMatch to stop.
+    void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
+};
+
+class RegexMatcher {  // RE2. Throws std::invalid_argument for a bad pattern
+public:
+    RegexMatcher(std::string_view pattern, bool caseSensitive);
+    bool foundIn(std::string_view text) const;  // even an empty match
+    // Non-empty matches only, left to right, without overlaps.
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 };
 
@@ -478,7 +486,10 @@ is a breaking change.
 | Quotes and backslashes | `"foo bar"` keeps spaces, `or`, `-` and `:` as text, with `\"` and `\\` inside. Outside quotes, `\` makes the next character text. Pieces join like in a shell: `pre"fix"` |
 | Queries with no search text, like `lang:go` or `-foo` | Return matching files, with nothing highlighted |
 | What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
-| `path:` and `file:` | Substring of the file's path, with the query's case rule. `file:` will also take a regex (M8) |
+| `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
+| `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
+| What makes a regex | A word that starts with `/` and ends with `/` before a space, `)` or the end. Otherwise it's text: `/usr/bin` and `// TODO` search for those words. A regex RE2 can't compile is an error with RE2's message |
+| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
 | Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
@@ -624,7 +635,7 @@ handle `(repo:A foo) or (repo:B bar)`. Split up, it becomes
 | `A or B` | `Or[A, B]`, which merges the posting lists. If either side is `All`, the result is `All` |
 | `not A` | `All`. The final check uses the index instead (see below) |
 | Filters like `lang:` or `path:` | `All` here. The final check applies them |
-| Regex | `All` in v1. See below |
+| Regex | RE2's prefilter tree of required text (see Regex below), or `All` |
 
 Never take the opposite of a candidate list. Its extra files would turn into
 missed matches.
@@ -672,18 +683,32 @@ code-search search "authenticate"
 ### Regex
 
 We use RE2, never `std::regex`. RE2 runs in linear time, so a bad pattern can't
-hang a search.
+hang a search. `RegexMatcher` compiles each pattern once, as `(?m)(?:pattern)`
+so `^` and `$` work per line, and checks the pattern on its own first: inside
+the group, `a)(b` would turn valid.
 
-1. v1: a regex becomes `All`, and RE2 checks every file the rest of the query
-   allows. Correct, and something to measure against.
-2. v2: use RE2's `FilteredRE2` to skip files. It returns pieces of text that
-   *might* be needed, combined through its own AND/OR tree. They aren't all
-   required: `/foo|bar/` must become `foo OR bar`, never `foo AND bar`. We only
-   add rules that tests show are safe.
-3. v3, only if measurements say it's worth it: our own regex-to-trigram analysis.
+1. v1 (done): a regex is `All`, and RE2 checks every file the rest of the query
+   allows. The correct baseline.
+2. v2 (done): RE2's prefilter, the AND/OR tree of text a match needs that
+   `FilteredRE2` uses, becomes the regex's candidates. `/foo|bar/` becomes
+   `foo OR bar`, never `foo AND bar`. Atoms shorter than 3 bytes become `All`.
+3. v3, only if measurements say it's worth it: our own regex-to-trigram
+   analysis. They don't yet (see [BENCHMARKS.md](BENCHMARKS.md)).
 
-We lowercase a regex for the trigram step only if RE2 folds case the same way
-(ASCII only). Otherwise the regex falls back to `All`.
+The prefilter lowercases with Unicode rules, and the index folds only ASCII.
+Where those differ, the index could miss a match, so:
+
+- A pattern that can name a non-ASCII character (with its bytes, `\x{...}`,
+  `\p` or `\P`) is `All`. Some lowercase into ASCII: U+212A KELVIN SIGN
+  becomes `k`.
+- Without `case:yes`, an atom with a `k` is `All`: RE2 then also matches
+  KELVIN SIGN for it.
+- An atom with non-ASCII bytes is `All`. After the first rule, these only
+  come from case variants like LONG S for `s`, which the index keeps as they
+  are; it's a second guard.
+
+Regexes under a `-` or in an `or` branch are checked in full, without the
+index shortcut literals get there.
 
 ### Symbol search (later)
 
@@ -768,7 +793,7 @@ code-search/
 │   │               shard_format.hpp  shard_writer.hpp  shard_reader.hpp
 │   │               posting_cursor.hpp  index_file_error.hpp
 │   ├── query/      ast.hpp  parser.hpp  language.hpp  planner.hpp  trigram_query.hpp
-│   ├── search/     literal_matcher.hpp  candidates.hpp  evaluator.hpp  searcher.hpp
+│   ├── search/     literal_matcher.hpp  regex_matcher.hpp  candidates.hpp  evaluator.hpp  searcher.hpp
 │   │               repo_search.hpp  json_output.hpp
 │   ├── app/        index_commit.hpp  repo_manager.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
@@ -801,7 +826,7 @@ code-search search 'auth lang:go -path:_test'
 code-search search '(repo:backend login) or (repo:frontend signIn)'
 code-search search -C 2 --max-results 20 'TODO'
 code-search search --json 'authenticate'
-code-search search '/auth(enticate|orize)/'      # regex, in M8
+code-search search '/auth(enticate|orize)/'      # regex
 code-search update my-backend
 code-search update my-backend --rebuild
 code-search remove my-backend                    # never deletes your code
@@ -819,7 +844,7 @@ with the planner; otherwise a planner bug would hide itself.
 | Candidates | Every real match survives the trigram step |
 | Literal search vs brute force | Same files and matches. Includes empty, short, common and missing queries, non-ASCII bytes, CRLF, no final newline, long lines and duplicate files |
 | Boolean queries | Random query trees over several repos, on one thread and on a thread pool, with and without a limit. `repo:A foo or repo:B bar`, path filters inside OR, queries with only `-` terms or only filters, unknown repo, precedence and quotes |
-| Regex vs brute force | Same results as RE2 run on every file with the same options |
+| Regex vs brute force | Random regexes (alternation, empty and optional branches, repeats, classes, anchors, `\b`, empty matches) inside the random query trees, against a reference that runs RE2 anchored at each character. The text includes KELVIN SIGN, LONG S and `é`/`É`, which RE2 folds differently from the index. Targeted tests for each case where the index step could miss a match |
 | Git | Pinned commit while HEAD moves, uncommitted changes, file names with newlines, tabs or a leading dash, symlinks, submodules, LFS pointers, huge files, SHA-256 rejection. The user's repo is never changed |
 | `git grep` | `git grep <commit-id>` on the same files, using syntax both support |
 | Publishing | Kill the process after every write, fsync and rename. The current state stays complete, cleanup removes leftovers, a second change waits for the lock, and searches keep working |

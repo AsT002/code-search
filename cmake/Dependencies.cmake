@@ -12,6 +12,27 @@ FetchContent_Declare(json
 )
 FetchContent_MakeAvailable(json)
 
+# RE2 for regex search (M8), and Abseil, which RE2 is built on. RE2 runs in
+# linear time, so no pattern can hang a search. Only what RE2 needs is built.
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(absl
+  URL https://github.com/abseil/abseil-cpp/releases/download/20250814.2/abseil-cpp-20250814.2.tar.gz
+  URL_HASH SHA256=f9148fb00ec98a2396bdf875c99a78e6a70afa662b107862d92b285d857a8320
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SYSTEM
+)
+set(RE2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(RE2_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(re2
+  URL https://github.com/google/re2/releases/download/2025-11-05/re2-2025-11-05.tar.gz
+  URL_HASH SHA256=87f6029d2f6de8aa023654240a03ada90e876ce9a4676e258dd01ea4c26ffd67
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SYSTEM
+)
+FetchContent_MakeAvailable(absl re2)
+
 if(CODESEARCH_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   set(BUILD_GMOCK ON CACHE BOOL "" FORCE)

@@ -5,6 +5,7 @@
 
 #include "codesearch/search/evaluator.hpp"
 #include "codesearch/search/literal_matcher.hpp"
+#include "codesearch/search/regex_matcher.hpp"
 
 namespace codesearch {
 namespace {
@@ -109,6 +110,62 @@ TEST(Evaluator, HighlightsOnlyTheMatchingParts) {
 
 TEST(Evaluator, RepoFiltersMustBeResolvedFirst) {
     EXPECT_THROW(Evaluator(allOf({literal("a"), repoFilter("x")}), {}), std::logic_error);
+}
+
+std::vector<Span> regexSpans(std::string_view pattern, std::string_view text,
+                             bool caseSensitive = true) {
+    std::vector<Span> spans;
+    RegexMatcher(pattern, caseSensitive).findAll(text, [&](Span span) {
+        spans.push_back(span);
+        return true;
+    });
+    return spans;
+}
+
+TEST(RegexMatcher, FindsEachMatchOnce) {
+    EXPECT_EQ(regexSpans("a+", "baaab a"), (std::vector<Span>{{1, 4}, {6, 7}}));
+    EXPECT_EQ(regexSpans("foo|foobar", "foobar"),
+              (std::vector<Span>{{0, 3}}));  // first branch wins
+    EXPECT_TRUE(regexSpans("z", "abc").empty());
+}
+
+// ^ and $ work on every line, not just the whole text. $ is before the LF,
+// so a CR before it is part of the line's text.
+TEST(RegexMatcher, AnchorsWorkOnEachLine) {
+    EXPECT_EQ(regexSpans("^b", "ab\nbc"), (std::vector<Span>{{3, 4}}));
+    EXPECT_EQ(regexSpans("b$", "ab\nbc"), (std::vector<Span>{{1, 2}}));
+    EXPECT_EQ(regexSpans("b\r?$", "ab\r\n"), (std::vector<Span>{{1, 3}}));
+}
+
+// An empty match makes the file match, but there's nothing to highlight.
+TEST(RegexMatcher, EmptyMatchesCountButArentShown) {
+    const RegexMatcher star("x*", true);
+    EXPECT_TRUE(star.foundIn("abc"));
+    EXPECT_EQ(regexSpans("x*", "axxb"), (std::vector<Span>{{1, 3}}));
+    EXPECT_EQ(regexSpans("x*", "\xC3\xA9x"), (std::vector<Span>{{2, 3}}));  // steps over é whole
+}
+
+TEST(RegexMatcher, CaseFoldingIsRe2s) {
+    EXPECT_EQ(regexSpans("ab", "AB ab", false), (std::vector<Span>{{0, 2}, {3, 5}}));
+    EXPECT_TRUE(regexSpans("ab", "AB", true).empty());
+    // Unlike plain text search, RE2 also folds non-ASCII letters.
+    EXPECT_EQ(regexSpans("\xC3\xA9", "\xC3\x89", false), (std::vector<Span>{{0, 2}}));
+    EXPECT_EQ(regexSpans("k", "\xE2\x84\xAA", false), (std::vector<Span>{{0, 3}}));  // KELVIN SIGN
+}
+
+TEST(RegexMatcher, BadPatternsAreRejected) {
+    EXPECT_THROW(RegexMatcher("(ab", true), std::invalid_argument);
+    EXPECT_THROW(RegexMatcher("a)(b", true), std::invalid_argument);
+    EXPECT_EQ(RegexMatcher::problemWith("a+"), std::nullopt);
+    EXPECT_NE(RegexMatcher::problemWith("[z-a]"), std::nullopt);
+}
+
+TEST(Evaluator, RegexesInQueries) {
+    const Evaluator evaluator(allOf({regex("^func \\w+"), pathRegex("\\.go$")}), {});
+    EXPECT_TRUE(evaluator.matches("a.go", "x\nfunc main"));
+    EXPECT_FALSE(evaluator.matches("a.go", "x func main"));
+    EXPECT_FALSE(evaluator.matches("a.py", "func main"));
+    EXPECT_EQ(evaluator.collectSpans("a.go", "x\nfunc main"), (std::vector<Span>{{2, 11}}));
 }
 
 }  // namespace

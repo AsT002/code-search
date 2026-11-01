@@ -103,6 +103,7 @@ struct QueryResult {
     std::string group;
     std::string text;
     std::size_t candidates = 0;
+    std::size_t candidateBytes = 0;  // the content of the candidates, all checked
     std::size_t results = 0;
     double candidatesMs = 0;
     double first = 0;
@@ -128,14 +129,26 @@ QueryResult measure(std::span<const SearchTarget> targets, const QueryLine& line
     for (std::size_t round = 0; round < rounds; ++round) {
         const Clock::time_point start = Clock::now();
         std::size_t candidates = 0;
+        std::vector<std::vector<DocId>> found;
         for (const SearchTarget& target : targets) {
             const QueryNode query = resolveRepo(request.query, target.name);
+            found.emplace_back();
             if (query != constant(false)) {
-                candidates += findCandidates(*target.index, planCandidates(query)).size();
+                found.back() =
+                    findCandidates(*target.index, planCandidates(query, request.options));
+                candidates += found.back().size();
             }
         }
         candidatesMs.push_back(msSince(start));
         result.candidates = candidates;
+        result.candidateBytes = 0;
+        for (std::size_t t = 0; t < targets.size(); ++t) {
+            for (const DocId doc : found[t]) {
+                targets[t].index->withContent(doc, [&](std::string_view content) {
+                    result.candidateBytes += content.size();
+                });
+            }
+        }
 
         request.maxResults = 0;
         const Timing timing = runOnce(targets, request, k);
@@ -254,13 +267,13 @@ int main(int argc, char** argv) {
     const std::string kText = std::to_string(k);
     std::cout << "### Queries (ms, median of " << rounds << " rounds, " << threads << " thread"
               << (threads == 1 ? "" : "s") << ")\n\n";
-    printRow({"Group", "Query", "Candidates", "Results", "Candidates ms", "First", "First " + kText,
-              "All", "Limit " + kText});
-    printRow({"---", "---", "---:", "---:", "---:", "---:", "---:", "---:", "---:"});
+    printRow({"Group", "Query", "Candidates", "Candidate MiB", "Results", "Candidates ms", "First",
+              "First " + kText, "All", "Limit " + kText});
+    printRow({"---", "---", "---:", "---:", "---:", "---:", "---:", "---:", "---:", "---:"});
     for (const QueryResult& r : results) {
         printRow({r.group, "`" + r.text + "`", std::to_string(r.candidates),
-                  std::to_string(r.results), ms(r.candidatesMs), ms(r.first), ms(r.firstK),
-                  ms(r.all), ms(r.limited)});
+                  ms(static_cast<double>(r.candidateBytes) / 1048576.0), std::to_string(r.results),
+                  ms(r.candidatesMs), ms(r.first), ms(r.firstK), ms(r.all), ms(r.limited)});
     }
 
     std::cout << "\n### Groups (ms, p50 / p95 over the group's queries)\n\n";

@@ -263,6 +263,21 @@ TEST(CliQuery, QueryLanguage) {
     EXPECT_EQ(searchIn(repo, {"(three python) or seven"}).out, "a.go:7:1:seven\n");
 }
 
+TEST(CliQuery, Regexes) {
+    TempRepo repo;
+    fillQueryRepo(repo);
+    EXPECT_EQ(searchIn(repo, {"/^(two|six) needle$/"}).out,
+              "a.go:2:1:two needle\na.go:6:1:six needle\n");
+    EXPECT_EQ(searchIn(repo, {"-l", "path:/\\.py$/ /needle/"}).out, "b.py\n");
+    ProcessResult result = searchIn(repo, {"--json", "/thr?e+/"});
+    EXPECT_TRUE(
+        contains(result.out, R"({"line":3,"text":"three","matches":[{"start":0,"end":5}]})"))
+        << result.out;
+    result = searchIn(repo, {"/(bad/"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "the regex /(bad/ isn't valid: missing )")) << result.err;
+}
+
 TEST(CliQuery, QueryErrors) {
     TempRepo repo;
     fillQueryRepo(repo);

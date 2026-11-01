@@ -78,7 +78,7 @@ SearchStatus forEachMatch(
     const std::function<bool(const FileMatch& file, std::string_view content)>& onFile,
     const std::atomic<bool>* cancelled) {
     // 1. Use the index to find files that might match.
-    const std::vector<DocId> candidates = findCandidates(index, planCandidates(query));
+    const std::vector<DocId> candidates = findCandidates(index, planCandidates(query, options));
 
     // 2. Check each one for real and pass on what matched.
     Evaluator evaluator(query, options);

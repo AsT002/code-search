@@ -2,7 +2,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <string_view>
+
+#include <re2/re2.h>
+
+#include "codesearch/util/utf8.hpp"
 
 namespace codesearch::testing {
 
@@ -52,6 +57,62 @@ bool contains(std::string_view text, std::string_view pattern, bool caseSensitiv
     return pattern.empty() || !occurrences(text, pattern, caseSensitive).empty();
 }
 
+// The regex the way the search compiles it: ^ and $ at every line, and the
+// query's case rule.
+std::unique_ptr<RE2> compileRegex(const std::string& pattern, bool caseSensitive) {
+    RE2::Options options;
+    options.set_case_sensitive(caseSensitive);
+    options.set_log_errors(false);
+    return std::make_unique<RE2>("(?m)(?:" + pattern + ")", options);
+}
+
+// Bytes in the character at text[i]: RE2 only starts matches at characters.
+// A byte that isn't part of valid UTF-8 counts as one.
+std::size_t characterLength(std::string_view text, std::size_t i) {
+    // The first byte says how long the character is: 0xxxxxxx is 1 byte,
+    // 110xxxxx is 2, 1110xxxx is 3, 11110xxx is 4.
+    const auto lead = static_cast<unsigned char>(text[i]);
+    std::size_t length = 1;
+    if (lead >= 0xF0) {
+        length = 4;
+    } else if (lead >= 0xE0) {
+        length = 3;
+    } else if (lead >= 0xC0) {
+        length = 2;
+    }
+    if (length == 1 || i + length > text.size()) {
+        return 1;
+    }
+    return isValidUtf8(text.substr(i, length)) ? length : 1;
+}
+
+// Non-empty regex matches, left to right: at each character, try a match that
+// must start there; the first one found is the leftmost. A different way to
+// get there than RegexMatcher, which asks RE2 to search.
+std::vector<Span> regexMatches(std::string_view text, const std::string& pattern,
+                               bool caseSensitive) {
+    const std::unique_ptr<RE2> re = compileRegex(pattern, caseSensitive);
+    std::vector<Span> spans;
+    std::size_t i = 0;
+    while (i <= text.size()) {
+        std::string_view found;
+        if (re->Match(text, i, text.size(), RE2::ANCHOR_START, &found, 1) && !found.empty()) {
+            spans.push_back(Span{i, i + found.size()});
+            i += found.size();
+            continue;
+        }
+        if (i == text.size()) {
+            break;
+        }
+        i += characterLength(text, i);
+    }
+    return spans;
+}
+
+bool regexFound(std::string_view text, const std::string& pattern, bool caseSensitive) {
+    return RE2::PartialMatch(text, *compileRegex(pattern, caseSensitive));
+}
+
 std::string_view languageOfTestPath(std::string_view path) {
     if (path.ends_with(".go")) {
         return "go";
@@ -79,6 +140,12 @@ bool fileMatches(const FileView& file, const QueryNode& query) {
     }
     if (const auto* path = std::get_if<PathNode>(&query.value)) {
         return contains(file.path, path->text, file.caseSensitive);
+    }
+    if (const auto* pattern = std::get_if<RegexNode>(&query.value)) {
+        return regexFound(file.content, pattern->pattern, file.caseSensitive);
+    }
+    if (const auto* pathPattern = std::get_if<PathRegexNode>(&query.value)) {
+        return regexFound(file.path, pathPattern->pattern, file.caseSensitive);
     }
     if (const auto* lang = std::get_if<LangNode>(&query.value)) {
         return languageOfTestPath(file.path) == lang->name;
@@ -112,6 +179,10 @@ bool fileMatches(const FileView& file, const QueryNode& query) {
 void allSpans(const FileView& file, const QueryNode& query, std::vector<Span>& out) {
     if (const auto* lit = std::get_if<LiteralNode>(&query.value)) {
         for (const Span span : occurrences(file.content, lit->text, file.caseSensitive)) {
+            out.push_back(span);
+        }
+    } else if (const auto* pattern = std::get_if<RegexNode>(&query.value)) {
+        for (const Span span : regexMatches(file.content, pattern->pattern, file.caseSensitive)) {
             out.push_back(span);
         }
     } else if (const auto* andNode = std::get_if<AndNode>(&query.value)) {

@@ -15,6 +15,19 @@ struct LiteralNode {
     friend bool operator==(const LiteralNode&, const LiteralNode&) = default;
 };
 
+// /pattern/: an RE2 regular expression. The file's content has a match.
+// An empty match counts, but only non-empty matches are highlighted.
+struct RegexNode {
+    std::string pattern;
+    friend bool operator==(const RegexNode&, const RegexNode&) = default;
+};
+
+// path:/pattern/ and file:/pattern/. The file's path has a match.
+struct PathRegexNode {
+    std::string pattern;
+    friend bool operator==(const PathRegexNode&, const PathRegexNode&) = default;
+};
+
 // path:text and file:text. The file's path contains `text`.
 struct PathNode {
     std::string text;
@@ -62,13 +75,22 @@ struct NotNode {
 };
 
 struct QueryNode {
-    std::variant<LiteralNode, PathNode, LangNode, RepoNode, ConstNode, AndNode, OrNode, NotNode>
+    std::variant<LiteralNode, RegexNode, PathNode, PathRegexNode, LangNode, RepoNode, ConstNode,
+                 AndNode, OrNode, NotNode>
         value;
     friend bool operator==(const QueryNode&, const QueryNode&) = default;
 };
 
 inline QueryNode literal(std::string text) {
     return {LiteralNode{std::move(text)}};
+}
+
+inline QueryNode regex(std::string pattern) {
+    return {RegexNode{std::move(pattern)}};
+}
+
+inline QueryNode pathRegex(std::string pattern) {
+    return {PathRegexNode{std::move(pattern)}};
 }
 
 inline QueryNode pathFilter(std::string text) {
@@ -100,7 +122,7 @@ inline QueryNode negate(QueryNode child) {
 }
 
 struct SearchOptions {
-    bool caseSensitive = false;  // for the text and for path:
+    bool caseSensitive = false;  // for the text, regexes and path:
 };
 
 }  // namespace codesearch

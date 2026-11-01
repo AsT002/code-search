@@ -2,9 +2,12 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "codesearch/index/memory_index.hpp"
+#include "codesearch/query/planner.hpp"
 
 namespace codesearch {
 namespace {
@@ -57,6 +60,57 @@ TEST(Search, ShortQueryChecksEveryFile) {
 
     ASSERT_EQ(results.files.size(), 1U);
     EXPECT_EQ(results.files[0].path, "a");
+}
+
+// The index folds only ASCII, but RE2 folds case by Unicode rules, and its
+// prefilter lowercases non-ASCII characters, some into ASCII. A regex must
+// still find these files: the index step may not rule them out.
+std::vector<std::string> regexFinds(const std::string& pattern, std::string_view content,
+                                    bool caseSensitive) {
+    IndexBuilder builder;
+    builder.add("a.txt", std::string(content));
+    builder.add("other.txt", "nothing here at all");
+    const SearchResults results =
+        search(builder.build(), regex(pattern), SearchOptions{.caseSensitive = caseSensitive});
+    std::vector<std::string> paths;
+    paths.reserve(results.files.size());
+    for (const FileMatch& file : results.files) {
+        paths.push_back(file.path);
+    }
+    return paths;
+}
+
+TEST(RegexSearch, KelvinSignForK) {
+    // Without case, RE2 matches KELVIN SIGN (U+212A) for k, but the index has
+    // no "key" in this file.
+    EXPECT_EQ(regexFinds("key",
+                         "\xE2\x84\xAA"
+                         "ey",
+                         false),
+              std::vector<std::string>{"a.txt"});
+}
+
+TEST(RegexSearch, NonAsciiCase) {
+    // The prefilter lowercases É to é; the index keeps É as it is.
+    EXPECT_EQ(regexFinds("\xC3\xA9t\xC3\xA9", "\xC3\x89T\xC3\x89", false),
+              std::vector<std::string>{"a.txt"});
+}
+
+TEST(RegexSearch, PatternsNamingNonAscii) {
+    // Even with case: \x{212A} names KELVIN SIGN, which the prefilter
+    // lowercases to an ASCII k.
+    EXPECT_EQ(regexFinds("[k\\x{212A}]ey",
+                         "\xE2\x84\xAA"
+                         "ey",
+                         true),
+              std::vector<std::string>{"a.txt"});
+}
+
+TEST(RegexSearch, TheIndexStillNarrowsAsciiRegexes) {
+    const TrigramQuery plan =
+        planCandidates(regex("foo|bar"), SearchOptions{.caseSensitive = true});
+    EXPECT_TRUE(std::holds_alternative<OrQuery>(plan.value));
+    EXPECT_EQ(regexFinds("fo+ba[rz]", "x foooobaz y", false), std::vector<std::string>{"a.txt"});
 }
 
 }  // namespace

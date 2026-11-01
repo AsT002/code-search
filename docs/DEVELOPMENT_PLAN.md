@@ -350,6 +350,29 @@ tests still pass.
 
 ## M8: Regex
 
+Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
+
+- RE2 2025-11-05 with Abseil 20250814.2, pinned by hash like the other
+  dependencies. They add about 16 s to a clean debug build.
+- Syntax: `/re/` for content, `path:/re/` and `file:/re/` for paths. A word
+  only becomes a regex if it ends with `/` before a space, `)` or the end, so
+  `/usr/bin` and `// TODO` stay text. Backslashes reach RE2 as typed, except
+  `\/`. `^` and `$` match per line (`(?m)`).
+- An empty match makes a file match without highlighting anything, like an
+  empty literal. Without `case:yes`, case folding is RE2's, which covers
+  non-ASCII letters too. Text search still folds only ASCII.
+- v1: a regex plans as `All`. v2: RE2's prefilter tree (`re2/prefilter.h`,
+  what `FilteredRE2` uses) becomes the candidates. It lowercases with Unicode
+  rules and the index folds only ASCII, so patterns that can name non-ASCII
+  characters, atoms with non-ASCII bytes, and (without case) atoms with `k`
+  fall back to `All`. Targeted tests show a missed match for each without
+  its rule. The random differential test didn't find these by itself.
+- v3 (our own regex analysis) isn't needed: with v2, regexes with required
+  text check 2 to 82 MiB instead of 130 MiB, and those without any (like
+  `\d{4}-\d{2}-\d{2}`) can't be narrowed by any analysis of required text.
+- Regexes under `-` or in an `or` branch don't use the index shortcut that
+  literals there get.
+
 - `RegexMatcher` with RE2, and a brute-force RE2 reference with the same options.
 - v1: a regex becomes `All`, and RE2 checks every file the rest of the query
   allows.

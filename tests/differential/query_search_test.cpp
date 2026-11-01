@@ -38,6 +38,16 @@ constexpr std::array<std::string_view, 8> kPaths = {
 };
 constexpr std::array<std::string_view, 4> kRepoNames = {"r0", "r1", "r2", "r3"};  // r3 never added
 constexpr std::array<std::string_view, 4> kLanguages = {"go", "python", "make", "cpp"};
+// Characters RE2 folds in ways ASCII-only folding doesn't: KELVIN SIGN with
+// k, LONG S with s, and é with É. Text sometimes gets one of these whole.
+constexpr std::array<std::string_view, 7> kFoldingPieces = {
+    "k", "K", "\xE2\x84\xAA", "s", "\xC5\xBF", "\xC3\xA9", "\xC3\x89",
+};
+// Pieces of regexes, each valid on its own.
+constexpr std::array<std::string_view, 18> kRegexAtoms = {
+    "a",    "b",   "k",   "s", "\xC3\xA9", ".",   " ",    "\\n",          "[ab]",
+    "[^a]", "\\w", "\\b", "^", "$",        "\\(", "\\\\", "[k\\x{212A}]", "A",
+};
 
 class Generator {
 public:
@@ -56,7 +66,44 @@ public:
     std::string text(std::size_t length) {
         std::string out;
         for (std::size_t i = 0; i < length; ++i) {
-            out.push_back(kAlphabet[number(0, kAlphabet.size() - 1)]);
+            if (number(0, 9) == 0) {
+                out += pick(kFoldingPieces);
+            } else {
+                out.push_back(kAlphabet[number(0, kAlphabet.size() - 1)]);
+            }
+        }
+        return out;
+    }
+
+    // A random regex: atoms joined, grouped, repeated and put in
+    // alternations, some with empty branches. Always valid.
+    std::string pattern(int depth) {
+        std::string out;
+        const std::size_t parts = number(1, 3);
+        for (std::size_t p = 0; p < parts; ++p) {
+            std::string part = depth < 2 && number(0, 3) == 0 ? "(" + pattern(depth + 1) + ")"
+                                                              : std::string(pick(kRegexAtoms));
+            switch (number(0, 7)) {
+                case 0:
+                    part += '*';
+                    break;
+                case 1:
+                    part += '+';
+                    break;
+                case 2:
+                    part += '?';
+                    break;
+                case 3:
+                    part += "{0,2}";
+                    break;
+                default:
+                    break;
+            }
+            out += part;
+        }
+        if (number(0, 4) == 0) {
+            out +=
+                number(0, 1) == 0 ? "|" : "|" + pattern(depth + 1);  // an empty branch, or another
         }
         return out;
     }
@@ -100,7 +147,7 @@ public:
             case 3:
                 return repoFilter(std::string(pick(kRepoNames)));
             case 4:
-                return negate(query(repos, depth + 1));
+                return number(0, 1) == 0 ? negate(query(repos, depth + 1)) : regex(pattern(0));
             default: {
                 std::vector<QueryNode> children;
                 const std::size_t count = number(2, 3);
@@ -136,6 +183,13 @@ std::string toText(const QueryNode& query) {
     }
     if (const auto* path = std::get_if<PathNode>(&query.value)) {
         return "path:" + quoted(path->text);
+    }
+    if (const auto* pattern = std::get_if<RegexNode>(&query.value)) {
+        std::string out = "/";
+        for (const char c : pattern->pattern) {
+            out += c == '/' ? "\\/" : std::string(1, c);
+        }
+        return out + "/";
     }
     if (const auto* lang = std::get_if<LangNode>(&query.value)) {
         return "lang:" + lang->name;
@@ -233,8 +287,8 @@ TEST(QuerySearchDifferential, MatchesBruteForce) {
 
             // Every real match must survive the trigram step in its repo.
             for (std::size_t r = 0; r < repos.size(); ++r) {
-                const std::vector<DocId> candidates =
-                    findCandidates(indexes[r], planCandidates(resolveRepo(query, repos[r].name)));
+                const std::vector<DocId> candidates = findCandidates(
+                    indexes[r], planCandidates(resolveRepo(query, repos[r].name), options));
                 for (const BruteFile& file : expected) {
                     if (file.repo != repos[r].name) {
                         continue;

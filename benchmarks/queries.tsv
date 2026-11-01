@@ -50,3 +50,12 @@ long	"if err != nil { return err }"
 long	"func (s *Server) ServeHTTP("
 long	"t.Fatalf(\"unexpected error: %v\", err)"
 long	"def initialize(name, version)"
+# regex: RE2 patterns (M8)
+regex	/func \w+\(ctx context\.Context/
+regex	/(TODO|FIXME|XXX):/
+regex	/^import \(/
+regex	/\berr != nil \{$/
+regex	/[A-Z][a-z]+Error\b/
+regex	/MustCompile\("/
+regex	/\d{4}-\d{2}-\d{2}/
+regex	/^\s*#include <vector>/

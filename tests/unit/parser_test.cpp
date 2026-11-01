@@ -83,6 +83,28 @@ TEST(Parser, Filters) {
     EXPECT_EQ(parsed("pa\\th:x"), literal("path:x"));
 }
 
+TEST(Parser, Regexes) {
+    EXPECT_EQ(parsed("/auth(enticate|orize)/"), regex("auth(enticate|orize)"));
+    EXPECT_EQ(parsed(R"(/\bfoo\d+\./)"), regex(R"(\bfoo\d+\.)"));  // backslashes stay, for RE2
+    EXPECT_EQ(parsed(R"(/a\/b/)"), regex("a/b"));                  // except \/, for /
+    EXPECT_EQ(parsed("/a b/ c"), allOf({regex("a b"), literal("c")}));
+    EXPECT_EQ(parsed("(/x/ or y)"), anyOf({regex("x"), literal("y")}));
+    EXPECT_EQ(parsed("-/x/"), negate(regex("x")));
+    EXPECT_EQ(parsed(R"(path:/\.go$/ file:/^src/)"),
+              allOf({pathRegex(R"(\.go$)"), pathRegex("^src")}));
+    // Not regexes: no closing / before a space or the end, or nothing inside.
+    EXPECT_EQ(parsed("/usr/bin"), literal("/usr/bin"));
+    EXPECT_EQ(parsed("// TODO"), allOf({literal("//"), literal("TODO")}));
+    EXPECT_EQ(parsed("a/b/"), literal("a/b/"));
+    EXPECT_EQ(parsed("\"/x/\""), literal("/x/"));
+}
+
+TEST(Parser, BadRegexesAreErrors) {
+    expectError("/(ab/", "the regex /(ab/ isn't valid: missing )");
+    expectError("/a)(b/", "isn't valid");  // valid only if wrapped in a group
+    expectError("path:/[z-a]/", "isn't valid");
+}
+
 TEST(Parser, CaseIsAnOption) {
     ParsedQuery query = parseQuery("foo case:yes");
     EXPECT_EQ(query.root, literal("foo"));

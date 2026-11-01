@@ -25,7 +25,8 @@ QueryNode resolveRepo(const QueryNode& query, std::string_view repoName);
 std::vector<std::string> repoNamesIn(const QueryNode& query);
 
 // Builds a TrigramQuery that finds at least every file matching `query`. It
-// may also find files that don't match; the evaluator removes those.
-TrigramQuery planCandidates(const QueryNode& query);
+// may also find files that don't match; the evaluator removes those. The
+// options matter for regexes; without them, the plan holds for any case rule.
+TrigramQuery planCandidates(const QueryNode& query, const SearchOptions& options = {});
 
 }  // namespace codesearch

@@ -1,5 +1,58 @@
 # Benchmarks
 
+## M8: Regex
+
+Same machine, repos and method as M7 below: warm runs with `search_bench`
+(median of 5 rounds), fresh processes with `run_benchmarks.py` (median of 3).
+The 8 regex queries are in `benchmarks/queries.tsv`. v1 checks every file
+with RE2; v2 first narrows the files with RE2's prefilter tree.
+
+### What the trigram step saves
+
+Files and bytes of content RE2 has to check, out of 18,829 files and
+130.2 MiB, and the time for all results, warm, in ms:
+
+| Query | Files, v1 | v2 | MiB, v1 | v2 | 1 thread, v1 | v2 | 8 threads, v1 | v2 |
+|-------|----:|----:|----:|----:|----:|----:|----:|----:|
+| `/func \w+\(ctx context\.Context/` | 18,829 | 214 | 130.2 | 5.7 | 40.4 | 2.50 | 10.0 | 0.86 |
+| `/(TODO\|FIXME\|XXX):/` | 18,829 | 751 | 130.2 | 20.7 | 213.3 | 46.5 | 42.1 | 8.77 |
+| `/^import \(/` | 18,829 | 6,425 | 130.2 | 75.3 | 203.6 | 123.3 | 42.7 | 26.7 |
+| `/\berr != nil \{$/` | 18,829 | 2,871 | 130.2 | 37.7 | 222.8 | 82.1 | 44.8 | 15.3 |
+| `/[A-Z][a-z]+Error\b/` | 18,829 | 7,345 | 130.2 | 82.2 | 224.9 | 152.4 | 45.7 | 29.4 |
+| `/MustCompile\("/` | 18,829 | 124 | 130.2 | 4.7 | 37.1 | 1.64 | 9.51 | 0.56 |
+| `/\d{4}-\d{2}-\d{2}/` | 18,829 | 18,829 | 130.2 | 130.2 | 205.2 | 207.5 | 41.9 | 41.0 |
+| `/^\s*#include <vector>/` | 18,829 | 36 | 130.2 | 2.2 | 201.2 | 3.82 | 40.9 | 1.70 |
+
+v2 checks between 1.7% and 63% of the content when the regex has text it
+needs, and the time follows. `\d{4}-\d{2}-\d{2}` has none, so both check
+everything. That's also why v3, our own analysis of what a regex needs,
+isn't worth building: it can't narrow a regex with no required text either,
+and where there is some, v2 already finds it.
+
+`func \w+\(...` and `MustCompile\("` are fast even in v1: RE2 skips ahead
+quickly to a literal prefix like `func ` in a file.
+
+### Fresh-process regex searches
+
+ms, median of 3. `rg -i -e` searches the same checkouts with the same
+pattern, for reference; its regex syntax covers these. (`git grep`'s doesn't
+have `\d` or `\b`, so it's left out.)
+
+| Query | First output | All | rg |
+|-------|----:|----:|----:|
+| `/func \w+\(ctx context\.Context/` | 4.77 | 5.34 | 222.2 |
+| `/(TODO\|FIXME\|XXX):/` | 11.9 | 15.2 | 219.8 |
+| `/^import \(/` | 7.43 | 33.6 | 239.1 |
+| `/\berr != nil \{$/` | 6.84 | 23.6 | 226.8 |
+| `/[A-Z][a-z]+Error\b/` | 8.38 | 37.5 | 221.8 |
+| `/MustCompile\("/` | 4.96 | 5.23 | 219.5 |
+| `/\d{4}-\d{2}-\d{2}/` | 6.82 | 49.3 | 220.9 |
+| `/^\s*#include <vector>/` | 6.08 | 6.37 | 223.5 |
+
+p50 / p95 over the 8: 15.2 / 49.3 ms for all results, against 222 / 239 ms
+for `rg`. The first output comes 2 to 3 ms later than for text queries,
+mostly from compiling the regex.
+
 ## M7: Performance
 
 ### Setup

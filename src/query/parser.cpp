@@ -1,5 +1,7 @@
 #include "codesearch/query/parser.hpp"
 
+#include <re2/re2.h>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +22,7 @@ enum class TokenKind {
     Close,  // )
     Or,     // or, OR
     Not,    // a '-' in front of something
+    Regex,  // /pattern/, or path:/pattern/ and file:/pattern/
     End,    // after the last token
 };
 
@@ -33,6 +36,8 @@ struct Token {
     // For Word: nothing in it was quoted or escaped. Only a plain "or" is
     // the keyword, so or"" and o\r are text, even though their text is "or".
     bool plain = true;
+    // For Regex: the pattern is for the path (path:/x/ or file:/x/).
+    bool forPath = false;
 };
 
 bool isSpace(char c) {
@@ -106,6 +111,62 @@ Token readWord(std::string_view input, std::size_t& pos) {
     return token;
 }
 
+// Reads a regex starting at input[pos], which is its opening '/'. The
+// pattern runs to the next '/' that isn't escaped and is followed by a
+// space, a ')' or the end. Backslashes stay as they are, for RE2, except
+// that \/ stands for '/'. Returns nothing, and leaves `pos` alone, if
+// there's no such '/' or the pattern would be empty: then it's plain text,
+// so "// TODO" and "/usr/bin" still search for text.
+std::optional<std::string> readRegex(std::string_view input, std::size_t& pos) {
+    std::string pattern;
+    std::size_t at = pos + 1;
+    while (at < input.size()) {
+        const char c = input[at];
+        if (c == '\\' && at + 1 < input.size()) {
+            if (input[at + 1] == '/') {
+                pattern += '/';
+            } else {
+                pattern += input.substr(at, 2);
+            }
+            at += 2;
+            continue;
+        }
+        if (c == '/') {
+            const bool ends =
+                at + 1 == input.size() || isSpace(input[at + 1]) || input[at + 1] == ')';
+            if (ends && !pattern.empty()) {
+                pos = at + 1;
+                return pattern;
+            }
+        }
+        pattern += c;
+        ++at;
+    }
+    return std::nullopt;
+}
+
+// A regex token at input[pos]: /pattern/ on its own, or as the value of
+// path: or file:. Moves `pos` past it. Returns nothing, and leaves `pos`
+// alone, if there isn't one (see readRegex).
+std::optional<Token> regexToken(std::string_view input, std::size_t& pos) {
+    const std::string_view rest = input.substr(pos);
+    const bool forPath = rest.starts_with("path:/") || rest.starts_with("file:/");
+    std::size_t start = forPath ? pos + 5 : pos;
+    if (input[start] != '/') {
+        return std::nullopt;
+    }
+    std::optional<std::string> pattern = readRegex(input, start);
+    if (!pattern.has_value()) {
+        return std::nullopt;
+    }
+    pos = start;
+    return Token{
+        .kind = TokenKind::Regex,
+        .text = std::move(pattern.value()),
+        .forPath = forPath,
+    };
+}
+
 std::vector<Token> tokenize(std::string_view input) {
     std::vector<Token> tokens;
     std::size_t pos = 0;
@@ -137,6 +198,10 @@ std::vector<Token> tokenize(std::string_view input) {
                 ++pos;
                 continue;
             }
+        }
+        if (std::optional<Token> pattern = regexToken(input, pos)) {
+            tokens.push_back(std::move(pattern.value()));
+            continue;
         }
         Token word = readWord(input, pos);
         if (word.plain && !afterNot && (word.text == "or" || word.text == "OR")) {
@@ -288,7 +353,22 @@ private:
             leave();
             return inner;
         }
+        if (token.kind == TokenKind::Regex) {
+            return parseRegex(token);
+        }
         return parseWord(token);
+    }
+
+    static QueryNode parseRegex(const Token& token) {
+        // Only to check it; the evaluator compiles it again with the
+        // query's options. log_errors(false): RE2 would print the error.
+        RE2::Options options;
+        options.set_log_errors(false);
+        const RE2 check(token.text, options);
+        if (!check.ok()) {
+            throw QueryError("the regex /" + token.text + "/ isn't valid: " + check.error());
+        }
+        return token.forPath ? pathRegex(token.text) : regex(token.text);
     }
 
     static QueryNode parseWord(const Token& token) {

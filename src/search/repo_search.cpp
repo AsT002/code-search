@@ -396,7 +396,8 @@ void ParallelSearch::prepare() {
         repo.evaluator.emplace(query, request_.options);
         try {
             repo.evaluator->useIndex(*target.index);
-            repo.candidates = findCandidates(*target.index, planCandidates(query));
+            repo.candidates =
+                findCandidates(*target.index, planCandidates(query, request_.options));
         } catch (const IndexFileError&) {
             // A damaged posting list. Reported when the results get to this
             // repo, as searchInTurn would, not before the repos ahead of it.

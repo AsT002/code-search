@@ -16,6 +16,16 @@ bool foundOrEmpty(const LiteralMatcher& matcher, std::string_view text) {
     return matcher.emptyPattern() || matcher.foundIn(text);
 }
 
+// The value in `value`, which the node's kind says is set (a Regex node
+// always has its regex).
+template <typename T>
+const T& set(const std::optional<T>& value) {
+    if (!value.has_value()) {
+        throw std::logic_error("a query node is missing its matcher");
+    }
+    return *value;
+}
+
 }  // namespace
 
 Evaluator::Evaluator(const QueryNode& query, const SearchOptions& options)
@@ -32,6 +42,12 @@ Evaluator::Node Evaluator::compile(const QueryNode& query, const SearchOptions& 
         node.matcher = LiteralMatcher(lit->text, options.caseSensitive);
         node.text = lit->text;
         node.required = required;
+    } else if (const auto* pattern = std::get_if<RegexNode>(&query.value)) {
+        node.kind = Kind::Regex;
+        node.regex.emplace(pattern->pattern, options.caseSensitive);
+    } else if (const auto* pathPattern = std::get_if<PathRegexNode>(&query.value)) {
+        node.kind = Kind::PathRegex;
+        node.regex.emplace(pathPattern->pattern, options.caseSensitive);
     } else if (const auto* path = std::get_if<PathNode>(&query.value)) {
         node.kind = Kind::Path;
         node.matcher = LiteralMatcher(path->text, options.caseSensitive);
@@ -97,8 +113,12 @@ bool Evaluator::nodeMatches(const Node& node, const File& file) {
                 return false;
             }
             return foundOrEmpty(node.matcher, file.content);
+        case Kind::Regex:
+            return set(node.regex).foundIn(file.content);
         case Kind::Path:
             return foundOrEmpty(node.matcher, file.path);
+        case Kind::PathRegex:
+            return set(node.regex).foundIn(file.path);
         case Kind::Lang:
             return languageOf(file.path) == node.lang;
         case Kind::Const:
@@ -145,6 +165,12 @@ void Evaluator::collect(const Node& node, const File& file, std::vector<Span>& o
                 return true;  // keep going
             });
             return;
+        case Kind::Regex:
+            set(node.regex).findAll(file.content, [&out](Span span) {
+                out.push_back(span);
+                return true;  // keep going
+            });
+            return;
         case Kind::And:
             for (const Node& child : node.children) {
                 collect(child, file, out);
@@ -158,6 +184,7 @@ void Evaluator::collect(const Node& node, const File& file, std::vector<Span>& o
             }
             return;
         case Kind::Path:
+        case Kind::PathRegex:
         case Kind::Lang:
         case Kind::Const:
         case Kind::Not:

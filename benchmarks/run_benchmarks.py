@@ -217,6 +217,12 @@ def bench_search(cs, queries, repos, repo_dir, env, runs):
                 return first, total
 
             _, gg_all = median_of(git_grep)
+        elif re.fullmatch(r"/[^\s].*/", query) and "/ " not in query:
+            # A regex on its own. rg reads the same syntax for these, and its
+            # ^ and $ also work per line. git grep's regex syntax doesn't
+            # have \d, \b and the like, so it's left out.
+            pattern = query[1:-1].replace("\\/", "/")
+            _, rg_all = median_of(lambda: run_stream(["rg", "-i", "-n", "--no-heading", "-e", pattern] + checkouts))
         by_group.setdefault(group, []).append((cs_first, cs_all, rg_all, gg_all))
         rows.append([group, f"`{query}`", ms(cs_first), ms(cs_all),
                      ms(rg_all) if rg_all else "", ms(gg_all) if gg_all else ""])

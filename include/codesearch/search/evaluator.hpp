@@ -8,6 +8,7 @@
 #include "codesearch/index/index_reader.hpp"
 #include "codesearch/query/ast.hpp"
 #include "codesearch/search/literal_matcher.hpp"
+#include "codesearch/search/regex_matcher.hpp"
 
 namespace codesearch {
 
@@ -41,7 +42,9 @@ public:
 private:
     enum class Kind {
         Literal,
+        Regex,
         Path,
+        PathRegex,
         Lang,
         Const,
         And,
@@ -53,6 +56,7 @@ private:
     struct Node {
         Kind kind = Kind::Const;
         LiteralMatcher matcher{"", false};  // for Literal and Path
+        std::optional<RegexMatcher> regex;  // for Regex and PathRegex
         std::string text;                   // for Literal: the text to find
         // For Literal: every candidate of the whole query contains its
         // trigrams, because the query needs it in every matching file.

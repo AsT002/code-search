@@ -61,6 +61,7 @@ Put the query in quotes, so the shell passes it as one argument:
 ./build/debug/code-search search 'case:yes Foo'
 ./build/debug/code-search search -C 2 --max-results 20 TODO    # context, limit (0: none)
 ./build/debug/code-search search --json authenticate
+./build/debug/code-search search '/auth(enticate|orize)\(/ lang:go'   # a regex
 ./build/debug/code-search search --color=always TODO | less -R  # colors into a pager
 ```
 
@@ -76,8 +77,10 @@ With `--json` the output is always one JSON document, even after an error.
 | `-foo` | files without foo |
 | `(a or b) c` | parentheses group |
 | `"foo bar"`, `\-x` | text as it is |
+| `/fo+ (bar\|baz)/` | a regex, in RE2 syntax; `^` and `$` match at each line |
 | `repo:name` | only this repo |
 | `path:text`, `file:text` | the path contains the text |
+| `path:/\.go$/` | the path matches the regex |
 | `lang:go` | the language, from the file name |
 | `case:yes`, `case:no` | match case or not |
 

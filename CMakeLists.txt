@@ -59,6 +59,7 @@ add_library(codesearch_core
   src/search/evaluator.cpp
   src/search/json_output.cpp
   src/search/literal_matcher.cpp
+  src/search/regex_matcher.cpp
   src/search/repo_search.cpp
   src/search/searcher.cpp
   src/util/atomic_file.cpp
@@ -73,7 +74,8 @@ add_library(codesearch_core
 )
 target_include_directories(codesearch_core PUBLIC include)
 find_package(Threads REQUIRED)
-target_link_libraries(codesearch_core PUBLIC Threads::Threads PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(codesearch_core PUBLIC Threads::Threads
+                      PRIVATE nlohmann_json::nlohmann_json re2::re2)
 target_compile_definitions(codesearch_core PRIVATE CODESEARCH_VERSION="${PROJECT_VERSION}")
 codesearch_set_warnings(codesearch_core)
 codesearch_set_clang_tidy(codesearch_core)

@@ -1,7 +1,12 @@
 #include "codesearch/query/planner.hpp"
 
+#include <re2/prefilter.h>
+#include <re2/re2.h>
+
 #include <algorithm>
+#include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include "codesearch/index/trigram.hpp"
@@ -161,13 +166,14 @@ TrigramQuery planLiteral(const LiteralNode& node) {
     return {query};
 }
 
-TrigramQuery planAnd(const AndNode& node) {
+// The candidates of every part at once: parts that allow every file are
+// left out, one that allows none makes it none, and an and inside an and is
+// lifted up a level.
+TrigramQuery combineAnd(std::vector<TrigramQuery> parts) {
     AndQuery query;
-    for (const QueryNode& child : node.children) {
-        TrigramQuery planned = planCandidates(child);
-
+    for (TrigramQuery& planned : parts) {
         if (std::holds_alternative<NoneQuery>(planned.value)) {
-            return planned;  // one child can't match, so nothing can
+            return planned;  // one part can't match, so nothing can
         }
         if (std::holds_alternative<AllQuery>(planned.value)) {
             continue;  // doesn't narrow anything, so leave it out
@@ -191,13 +197,13 @@ TrigramQuery planAnd(const AndNode& node) {
     return {query};
 }
 
-TrigramQuery planOr(const OrNode& node) {
+// The candidates of any of the parts: one part that allows every file makes
+// it every file, ones that allow none are left out.
+TrigramQuery combineOr(std::vector<TrigramQuery> parts) {
     OrQuery query;
-    for (const QueryNode& child : node.children) {
-        TrigramQuery planned = planCandidates(child);
-
+    for (TrigramQuery& planned : parts) {
         if (std::holds_alternative<AllQuery>(planned.value)) {
-            return planned;  // one child could match any file, so all of them can
+            return planned;  // one part could match any file, so all of them can
         }
         if (std::holds_alternative<NoneQuery>(planned.value)) {
             continue;  // adds no files
@@ -218,6 +224,112 @@ TrigramQuery planOr(const OrNode& node) {
         return query.children[0];
     }
     return {query};
+}
+
+TrigramQuery plan(const QueryNode& query, const SearchOptions& options);
+
+std::vector<TrigramQuery> planEach(const std::vector<QueryNode>& children,
+                                   const SearchOptions& options) {
+    std::vector<TrigramQuery> parts;
+    parts.reserve(children.size());
+    for (const QueryNode& child : children) {
+        parts.push_back(plan(child, options));
+    }
+    return parts;
+}
+
+// True if `pattern` could name a character outside ASCII: with its bytes,
+// \x{...}, or a Unicode class like \p{L}. RE2's prefilter lowercases those
+// with Unicode rules, and some become ASCII (U+212A KELVIN SIGN becomes k),
+// which the index, folding only ASCII, wouldn't find.
+bool mayNameNonAscii(std::string_view pattern) {
+    const bool nonAsciiByte = std::any_of(pattern.begin(), pattern.end(), [](char c) {
+        return static_cast<unsigned char>(c) >= 0x80;
+    });
+    return nonAsciiByte || pattern.find("\\x{") != std::string_view::npos ||
+           pattern.find("\\p") != std::string_view::npos ||
+           pattern.find("\\P") != std::string_view::npos;
+}
+
+// Turns RE2's prefilter tree into candidates. Its atoms are pieces of text,
+// lowercased, that a match needs, joined by AND and OR. An atom is only
+// used if the index finds it the same way. Without case, an atom with a 'k'
+// isn't: RE2 then also matches KELVIN SIGN for it. Nor is one with bytes
+// outside ASCII. (After mayNameNonAscii, those only come from case variants
+// like LONG S for s, which the index does keep as they are; this is a second
+// guard, in case RE2 lowercases more in a later version.) Others allow every
+// file.
+TrigramQuery fromPrefilter(re2::Prefilter& node, bool caseSensitive) {
+    switch (node.op()) {
+        case re2::Prefilter::ALL:
+            return {AllQuery{}};
+        case re2::Prefilter::NONE:
+            return {NoneQuery{}};
+        case re2::Prefilter::ATOM: {
+            const std::string& atom = node.atom();
+            const bool ascii = std::all_of(atom.begin(), atom.end(), [](char c) {
+                return static_cast<unsigned char>(c) < 0x80;
+            });
+            if (!ascii || (!caseSensitive && atom.find('k') != std::string::npos)) {
+                return {AllQuery{}};
+            }
+            return planLiteral(LiteralNode{atom});
+        }
+        case re2::Prefilter::AND:
+        case re2::Prefilter::OR: {
+            std::vector<TrigramQuery> parts;
+            for (re2::Prefilter* sub : *node.subs()) {
+                parts.push_back(fromPrefilter(*sub, caseSensitive));
+            }
+            return node.op() == re2::Prefilter::AND ? combineAnd(std::move(parts))
+                                                    : combineOr(std::move(parts));
+        }
+    }
+    return {AllQuery{}};  // every op returned above; this keeps the compiler happy
+}
+
+// The candidates for a regex, from the same AND/OR tree of required text
+// that RE2's FilteredRE2 uses. /foo|bar/ becomes foo OR bar.
+TrigramQuery planRegex(const RegexNode& node, bool caseSensitive) {
+    if (mayNameNonAscii(node.pattern)) {
+        return {AllQuery{}};
+    }
+    // Compiled the way RegexMatcher compiles it, so the tree fits what's run.
+    RE2::Options re2Options;
+    re2Options.set_case_sensitive(caseSensitive);
+    re2Options.set_log_errors(false);
+    const RE2 compiled("(?m)(?:" + node.pattern + ")", re2Options);
+    if (!compiled.ok()) {
+        return {AllQuery{}};
+    }
+    // FromRE2 returns a new tree, or null; unique_ptr deletes it.
+    const std::unique_ptr<re2::Prefilter> tree(re2::Prefilter::FromRE2(&compiled));
+    if (tree == nullptr) {
+        return {AllQuery{}};
+    }
+    return fromPrefilter(*tree, caseSensitive);
+}
+
+TrigramQuery plan(const QueryNode& query, const SearchOptions& options) {
+    if (const auto* node = std::get_if<LiteralNode>(&query.value)) {
+        return planLiteral(*node);
+    }
+    if (const auto* node = std::get_if<RegexNode>(&query.value)) {
+        return planRegex(*node, options.caseSensitive);
+    }
+    if (const auto* node = std::get_if<AndNode>(&query.value)) {
+        return combineAnd(planEach(node->children, options));
+    }
+    if (const auto* node = std::get_if<OrNode>(&query.value)) {
+        return combineOr(planEach(node->children, options));
+    }
+    if (const auto* node = std::get_if<ConstNode>(&query.value)) {
+        return node->value ? TrigramQuery{AllQuery{}} : TrigramQuery{NoneQuery{}};
+    }
+    // Filters and '-': the index can't narrow these down, so every file is a
+    // candidate and the evaluator decides. Taking the opposite of a candidate
+    // list for '-' would be wrong: its extra files would become missed matches.
+    return {AllQuery{}};
 }
 
 }  // namespace
@@ -256,23 +368,8 @@ std::vector<std::string> repoNamesIn(const QueryNode& query) {
     return names;
 }
 
-TrigramQuery planCandidates(const QueryNode& query) {
-    if (const auto* node = std::get_if<LiteralNode>(&query.value)) {
-        return planLiteral(*node);
-    }
-    if (const auto* node = std::get_if<AndNode>(&query.value)) {
-        return planAnd(*node);
-    }
-    if (const auto* node = std::get_if<OrNode>(&query.value)) {
-        return planOr(*node);
-    }
-    if (const auto* node = std::get_if<ConstNode>(&query.value)) {
-        return node->value ? TrigramQuery{AllQuery{}} : TrigramQuery{NoneQuery{}};
-    }
-    // Filters and '-': the index can't narrow these down, so every file is a
-    // candidate and the evaluator decides. Taking the opposite of a candidate
-    // list for '-' would be wrong: its extra files would become missed matches.
-    return {AllQuery{}};
+TrigramQuery planCandidates(const QueryNode& query, const SearchOptions& options) {
+    return plan(query, options);
 }
 
 }  // namespace codesearch
