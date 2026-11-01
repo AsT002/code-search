@@ -164,7 +164,7 @@ std::vector<TreeEntry> GitRepo::listFiles(const ObjectId& commit) const {
 }
 
 BlobStream::BlobStream(const GitRepo& repo)
-    : git_("git", gitArgs(repo.dir(), {"cat-file", "--batch"})) {}
+    : git_("git", gitArgs(repo.dir(), {"cat-file", "--batch"}), gitEnv()) {}
 
 Blob BlobStream::read(const ObjectId& id, std::uint64_t maxBytes) {
     git_.write(id.hex() + "\n");

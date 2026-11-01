@@ -50,8 +50,8 @@ TEST(Publisher, CleanUpKeepsOnlyWhatTheRegistryUses) {
     std::filesystem::create_directories(workspace.cloneDir("r_00000001") / "objects");
     std::filesystem::create_directories(workspace.cloneDir("r_00000002"));  // local: not ours
     std::filesystem::create_directories(workspace.cloneDir("r_00000003") / "objects");
-    writeFile(workspace.tmpDir() / "half-built.idx", "x");
-    std::filesystem::create_directories(workspace.tmpDir() / "folder" / "inside");
+    writeFile(workspace.tmpDir() / "r_00000001-g0003.idx", "half built");
+    writeFile(workspace.tmpDir() / "r_00000001-g0003.idx.tmp-a1B2c3", "half written");
 
     cleanUp(workspace, registry);
     EXPECT_EQ(namesIn(workspace.indexesDir()),
@@ -68,9 +68,11 @@ TEST(Publisher, CleanUpNeverFollowsSymlinksOut) {
     writeFile(dir.file("precious") / "code.txt", "keep me");
     writeFile(dir.file("precious.idx"), "keep me too");
     std::filesystem::create_directory_symlink(dir.file("precious"),
-                                              workspace.reposDir() / "r_x.git");
-    std::filesystem::create_directory_symlink(dir.file("precious"), workspace.tmpDir() / "link");
-    std::filesystem::create_symlink(dir.file("precious.idx"), workspace.indexesDir() / "a.idx");
+                                              workspace.reposDir() / "r_00000001.git");
+    std::filesystem::create_directory_symlink(dir.file("precious"),
+                                              workspace.tmpDir() / "r_00000001-g0001.idx");
+    std::filesystem::create_symlink(dir.file("precious.idx"),
+                                    workspace.indexesDir() / "r_00000001-g0001.idx");
 
     cleanUp(workspace, Registry{});
     EXPECT_TRUE(namesIn(workspace.reposDir()).empty());  // the links are gone...
@@ -123,8 +125,77 @@ TEST(Publisher, CleanUpRemovesRegistryTempFiles) {
 
     cleanUp(workspace, Registry{});
     EXPECT_EQ(namesIn(workspace.root()),
-              (std::set<std::string>{"indexes", "notes.txt", "registry.json", "repos", "tmp"}));
+              (std::set<std::string>{"code-search-workspace", "indexes", "notes.txt",
+                                     "registry.json", "repos", "tmp"}));
     EXPECT_EQ(readFile(dir.file("outside.txt")), "keep me");
+}
+
+// Files code-search didn't make stay, even ones that look a bit like ours.
+TEST(Publisher, CleanUpDeletesOnlyNamesWeMake) {
+    const TempDir dir;
+    const Workspace workspace(dir.file("ws"));
+    workspace.create();
+    const std::set<std::string> strangers = {
+        "notes.txt",
+        "r_1.git",
+        "r_0000000G.git",
+        "r_00000001",
+        "r_0000000g-g0001.idx",
+        "r_00000001-g01.idx",
+        "r_00000001-g0001.idx.bak",
+        "x.tmp-a1B2c3",
+    };
+    for (const std::filesystem::path& folder :
+         {workspace.tmpDir(), workspace.indexesDir(), workspace.reposDir()}) {
+        for (const std::string& name : strangers) {
+            writeFile(folder / name, "keep me");
+        }
+        std::filesystem::create_directories(folder / "project" / "src");
+    }
+    writeFile(workspace.tmpDir() / "r_00000001-g0001.idx", "ours");
+    writeFile(workspace.indexesDir() / "r_00000001-g0001.idx", "ours");
+    std::filesystem::create_directories(workspace.reposDir() / "r_00000001.git");
+
+    cleanUp(workspace, Registry{});
+    std::set<std::string> left = strangers;
+    left.insert("project");
+    for (const std::filesystem::path& folder :
+         {workspace.tmpDir(), workspace.indexesDir(), workspace.reposDir()}) {
+        EXPECT_EQ(namesIn(folder), left) << folder;
+    }
+}
+
+// Pointing CODE_SEARCH_HOME at a folder that holds other files, like ~,
+// must not turn that folder into a workspace.
+TEST(Workspace, RefusesAFolderThatHoldsOtherFiles) {
+    const TempDir dir;
+    const Workspace home(dir.file("home"));
+    std::filesystem::create_directories(home.tmpDir());
+    writeFile(home.tmpDir() / "r_00000001-g0001.idx", "the user's file");
+    EXPECT_THROW(home.create(), std::runtime_error);
+    EXPECT_EQ(namesIn(home.root()), (std::set<std::string>{"tmp"}));  // nothing added
+
+    writeFile(dir.file("file"), "x");
+    EXPECT_THROW(Workspace(dir.file("file")).create(), std::runtime_error);
+}
+
+TEST(Workspace, TakesANewOrEmptyFolderOrAnOldWorkspace) {
+    const TempDir dir;
+    const Workspace fresh(dir.file("new"));
+    fresh.create();
+    EXPECT_TRUE(std::filesystem::exists(fresh.markerFile()));
+    writeFile(fresh.tmpDir() / "r_00000001-g0001.idx", "x");
+    EXPECT_NO_THROW(fresh.create());  // the marker says it's ours
+
+    std::filesystem::create_directories(dir.file("empty"));
+    EXPECT_NO_THROW(Workspace(dir.file("empty")).create());
+
+    // Made before the marker existed: registry.json says it's ours.
+    const Workspace old(dir.file("old"));
+    std::filesystem::create_directories(old.indexesDir());
+    writeFile(old.registryFile(), "{}");
+    old.create();
+    EXPECT_TRUE(std::filesystem::exists(old.markerFile()));
 }
 
 TEST(Publisher, CleanUpWithoutFoldersDoesNothing) {

@@ -2,6 +2,7 @@
 
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include "codesearch/index/shard_reader.hpp"
@@ -25,15 +26,37 @@ void removeEntry(const std::filesystem::path& dir, const std::filesystem::direct
     std::filesystem::remove_all(real);  // doesn't follow symlinks inside it either
 }
 
-// Deletes every entry in `dir` whose name isn't in `keep`.
-void removeAllExcept(const std::filesystem::path& dir, const std::set<std::string>& keep) {
+// True for "r_1c2d3e4f-g0001.idx", the name of an index file of any repo.
+bool isIndexFile(std::string_view name) {
+    const std::string_view id = name.substr(0, name.find('-'));
+    return isValidRepoId(id) && isValidIndexFileName(name, id);
+}
+
+// True for "r_1c2d3e4f.git", the name of a clone.
+bool isClone(std::string_view name) {
+    return name.ends_with(".git") && isValidRepoId(name.substr(0, name.size() - 4));
+}
+
+// True for an index file being built in tmp/, or the "<name>.tmp-XXXXXX"
+// file AtomicFile writes it to first.
+bool isBuildFile(std::string_view name) {
+    const std::size_t tmp = name.find(".tmp-");
+    return isIndexFile(name.substr(0, tmp));
+}
+
+// Deletes every entry in `dir` that code-search made, unless its name is in
+// `keep`. `ours` is a function like isIndexFile that says which names we
+// make. Anything else is left alone: it isn't ours to delete.
+void removeAllExcept(const std::filesystem::path& dir, const std::set<std::string>& keep,
+                     bool (*ours)(std::string_view)) {
     if (!std::filesystem::exists(dir)) {
         return;
     }
     // Collect first: deleting while walking the folder can confuse the walk.
     std::vector<std::filesystem::directory_entry> doomed;
     for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(dir)) {
-        if (!keep.contains(entry.path().filename().string())) {
+        const std::string name = entry.path().filename().string();
+        if (ours(name) && !keep.contains(name)) {
             doomed.push_back(entry);
         }
     }
@@ -92,9 +115,9 @@ void cleanUp(const Workspace& workspace, const Registry& registry) {
             clones.insert(workspace.cloneDir(repo.id).filename().string());
         }
     }
-    removeAllExcept(workspace.tmpDir(), {});
-    removeAllExcept(workspace.indexesDir(), indexFiles);
-    removeAllExcept(workspace.reposDir(), clones);
+    removeAllExcept(workspace.tmpDir(), {}, isBuildFile);
+    removeAllExcept(workspace.indexesDir(), indexFiles, isIndexFile);
+    removeAllExcept(workspace.reposDir(), clones, isClone);
     removeRegistryTempFiles(workspace);
 }
 

@@ -43,23 +43,6 @@ bool isDigits(std::string_view text) {
     });
 }
 
-bool isValidRepoId(std::string_view id) {
-    return id.size() == kIdPrefix.size() + kIdHexDigits && id.starts_with(kIdPrefix) &&
-           isLowerHex(id.substr(kIdPrefix.size()));
-}
-
-// "<id>-g<at least 4 digits>.idx". Checked on load, because the name is
-// joined to the indexes/ folder: it must never hold a '/' or "..".
-bool isValidIndexFileName(std::string_view file, std::string_view id) {
-    const std::string start = std::string(id) + "-g";
-    if (!file.starts_with(start) || !file.ends_with(".idx")) {
-        return false;
-    }
-    const std::string_view digits =
-        file.substr(start.size(), file.size() - start.size() - std::string_view(".idx").size());
-    return digits.size() >= 4 && isDigits(digits);
-}
-
 std::string fingerprintToHex(std::uint64_t value) {
     std::string hex(kFingerprintHexDigits, '0');
     for (std::size_t i = kFingerprintHexDigits; i > 0; --i) {
@@ -159,6 +142,21 @@ RepoEntry repoFromJson(const Json& json) {
 }
 
 }  // namespace
+
+bool isValidRepoId(std::string_view id) {
+    return id.size() == kIdPrefix.size() + kIdHexDigits && id.starts_with(kIdPrefix) &&
+           isLowerHex(id.substr(kIdPrefix.size()));
+}
+
+bool isValidIndexFileName(std::string_view file, std::string_view id) {
+    const std::string start = std::string(id) + "-g";
+    if (!file.starts_with(start) || !file.ends_with(".idx")) {
+        return false;
+    }
+    const std::string_view digits =
+        file.substr(start.size(), file.size() - start.size() - std::string_view(".idx").size());
+    return digits.size() >= 4 && isDigits(digits);
+}
 
 const RepoEntry* Registry::find(std::string_view name) const {
     for (const RepoEntry& repo : repos) {

@@ -535,6 +535,45 @@ TEST(CliRepos, AddErrors) {
     EXPECT_TRUE(contains(result.err, "no repo named nope")) << result.err;
 }
 
+// Git sets GIT_DIR and friends for hooks and aliases. They must not make
+// code-search index a different repo than the one it was given.
+TEST(CliRepos, GitVariablesDontChangeTheRepo) {
+    TempRepo wanted;
+    fillRepo(wanted);
+    TempRepo other;
+    other.write("other.txt", "other target\n");
+    other.commit();
+    const TempDir home;
+    const std::string otherGit = (other.dir() / ".git").string();
+    const std::vector<std::string> gitEnv = {
+        "GIT_DIR=" + otherGit,
+        "GIT_WORK_TREE=" + other.dir().string(),
+        "GIT_OBJECT_DIRECTORY=" + otherGit + "/objects",
+        "GIT_INDEX_FILE=" + otherGit + "/index",
+    };
+    ProcessResult result = codeSearch({"add", wanted.dir().string()}, home.dir(), gitEnv);
+    ASSERT_EQ(result.exitCode, 0) << result.err;
+    result = codeSearch({"search", "-l", "target"}, home.dir(), gitEnv);
+    EXPECT_TRUE(contains(result.out, "a.txt")) << result.out;
+    EXPECT_FALSE(contains(result.out, "other.txt")) << result.out;
+    result = searchIn(wanted, {"-l", "target"});
+    EXPECT_FALSE(contains(result.out, "other.txt")) << result.out;
+}
+
+// CODE_SEARCH_HOME pointing at a folder of the user's, like ~ with a tmp/
+// folder in it. Nothing in it may be deleted.
+TEST(CliRepos, RefusesAHomeThatHoldsOtherFiles) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir home;
+    std::filesystem::create_directories(home.dir() / "tmp");
+    testing::writeFile(home.dir() / "tmp" / "notes.txt", "keep me");
+    const ProcessResult result = codeSearch({"add", repo.dir().string()}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "isn't a code-search folder")) << result.err;
+    EXPECT_EQ(testing::readFile(home.dir() / "tmp" / "notes.txt"), "keep me");
+}
+
 TEST(CliRepos, MissingGitIsAClearError) {
     TempRepo repo;
     fillRepo(repo);

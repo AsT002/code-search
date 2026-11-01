@@ -111,17 +111,29 @@ int take(int& fd) {
     return taken;
 }
 
-// The environment for the child: `extraEnv`, then each of ours whose name
-// isn't in `extraEnv`. Entries look like "NAME=value".
+// The name in an environment entry, with the '=': "NAME=" for "NAME=value".
+// An entry with no '=' is just a name, so this adds one.
+std::string nameOf(std::string_view entry) {
+    return std::string(entry.substr(0, entry.find('='))) + "=";
+}
+
+// The environment for the child: the "NAME=value" entries of `extraEnv`,
+// then each of ours whose name isn't in `extraEnv`. A plain "NAME" in
+// `extraEnv` only drops ours.
 std::vector<std::string> childEnvironment(const std::vector<std::string>& extraEnv) {
-    std::vector<std::string> result = extraEnv;
+    std::vector<std::string> result;
+    for (const std::string& entry : extraEnv) {
+        if (entry.find('=') != std::string::npos) {
+            result.push_back(entry);
+        }
+    }
     for (char* const* entry = environ; *entry != nullptr;
          ++entry) {  // NOLINT(*-pointer-arithmetic)
         const std::string_view ours = *entry;
-        const std::string_view name = ours.substr(0, ours.find('=') + 1);  // with the '='
+        const std::string name = nameOf(ours);
         const bool replaced =
             std::any_of(extraEnv.begin(), extraEnv.end(), [&](const std::string& e) {
-                return e.starts_with(name);
+                return nameOf(e) == name;
             });
         if (!replaced) {
             result.emplace_back(ours);

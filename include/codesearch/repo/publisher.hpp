@@ -29,9 +29,11 @@ std::filesystem::path writeToTmp(const Workspace& workspace, const MemoryIndex& 
 // Moves a file from tmp/ into indexes/, keeping its name.
 void moveIntoIndexes(const Workspace& workspace, const std::filesystem::path& tmpFile);
 
-// Deletes everything in tmp/, index files `registry` doesn't name, clones of
-// repos it doesn't list, and temp files a killed registry save left next to
-// registry.json. It first checks the three folders are real folders inside
+// Deletes builds left in tmp/, index files `registry` doesn't name, clones
+// of repos it doesn't list, and temp files a killed registry save left next
+// to registry.json. Only names code-search makes are deleted (like
+// "r_1c2d3e4f-g0001.idx" and "r_1c2d3e4f.git"); anything else in the
+// folders is left alone. It first checks the three folders are real folders inside
 // the workspace (Workspace::checkFolders). It only deletes things directly
 // inside them, and checks that after following symlinks. A symlink is deleted
 // itself, never what it points to.

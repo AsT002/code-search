@@ -50,6 +50,14 @@ struct Registry {
 // '-' or '.'. So a name can't look like an option, and is safe to print.
 bool isValidRepoName(std::string_view name);
 
+// Repo IDs look like "r_1c2d3e4f": "r_" and 8 lower-case hex digits.
+bool isValidRepoId(std::string_view id);
+
+// Index file names look like "<id>-g<at least 4 digits>.idx". The registry
+// checks this on load, because the name is joined to the indexes/ folder: it
+// must never hold a '/' or "..".
+bool isValidIndexFileName(std::string_view file, std::string_view id);
+
 // The index file name for repo `id`'s build number `generation`.
 std::string indexFileName(const std::string& id, std::uint32_t generation);
 

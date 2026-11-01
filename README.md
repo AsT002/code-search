@@ -94,8 +94,13 @@ Only `https://github.com/<owner>/<repo>` URLs are accepted.
 Binary files, files over 1 MB, symlinks, submodules, Git LFS pointers and
 minified JS and CSS are skipped. `add` prints a summary of what was skipped.
 
-Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. Only
-one `add`, `update` or `remove` runs at a time; a second one waits. Searches never wait.
+A local repo is added by its top folder, the one with `.git` in it (or the repo
+folder itself for a bare repo). Subfolders are refused.
+
+Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. That
+folder must be new, empty or already used by code-search: it refuses a folder
+that holds other files. Only one `add`, `update` or `remove` runs at a time; a
+second one waits. Searches never wait.
 
 To search a repo without adding it, use `--path`. It indexes the repo in memory
 every time, which is slow on big repos:

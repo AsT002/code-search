@@ -21,9 +21,19 @@ using GitResult = ProcessResult;  // another name for the same type
 std::vector<std::string> gitArgs(const std::filesystem::path& dir,
                                  const std::vector<std::string>& args);
 
+// The `extraEnv` to start Git with (see Process): `extraEnv` itself, plus
+// leaving out the variables like GIT_DIR that would make Git ignore -C and
+// --git-dir. Every Git we start must use this.
+std::vector<std::string> gitEnv(const std::vector<std::string>& extraEnv = {});
+
 // Runs `git -C <dir> <args...>`, waits for it and returns everything it
 // printed. Throws GitError if git can't be started.
 GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string>& args);
+
+// The canonical top folder of the repo `dir` is in: the folder with .git in
+// it, or the repo folder itself for a bare repo. Throws GitError if `dir`
+// isn't in a repo, or is inside a .git folder.
+std::filesystem::path repoTopFolder(const std::filesystem::path& dir);
 
 // Makes a bare, shallow clone of `url`'s default branch in `dest`, with no
 // tags: git clone --bare --depth 1 --single-branch --no-tags. Git is told

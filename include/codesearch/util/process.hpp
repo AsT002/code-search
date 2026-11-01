@@ -34,8 +34,9 @@ public:
 class Process {
 public:
     // `program` is found through PATH. `args` don't include the program name.
-    // The program gets our environment variables, plus `extraEnv`: entries
-    // like "NAME=value" that are added or replace ours.
+    // The program gets our environment variables, changed by `extraEnv`:
+    // "NAME=value" adds a variable or replaces ours, and a plain "NAME"
+    // leaves ours out.
     Process(const std::string& program, const std::vector<std::string>& args,
             const std::vector<std::string>& extraEnv = {});
     ~Process();

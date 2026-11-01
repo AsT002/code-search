@@ -247,6 +247,46 @@ TEST(RepoManager, BadAddsChangeNothing) {
     expectTidy(workspace);
 }
 
+// Git finds a repo from any folder inside it, so only the top folder of a
+// repo can be added. Otherwise a subfolder would index the whole repo, and
+// the same repo could be added twice under two names.
+TEST(RepoManager, AddsOnlyTheTopFolderOfARepo) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo backend;
+    backend.write("src/c.txt", "in a subfolder\n");
+    fillBackend(backend);
+    RepoManager manager(workspace, noGitHub());
+    const std::string top = std::filesystem::canonical(backend.dir()).string();
+    expectError(
+        [&] {
+            manager.add((backend.dir() / "src").string(), "x");
+        },
+        "is inside the repo " + top + ". Add " + top + " instead");
+    for (const std::string inside : {".git", ".git/refs"}) {
+        expectError(
+            [&] {
+                manager.add((backend.dir() / inside).string(), "x");
+            },
+            "is inside a repo's .git folder");
+    }
+    EXPECT_FALSE(std::filesystem::exists(workspace.registryFile()));
+
+    // A bare repo is its own top folder.
+    const std::filesystem::path bare = home.file("bare.git");
+    ASSERT_EQ(runProcess("git", {"clone", "--quiet", "--bare", "--", backend.dir().string(),
+                                 bare.string()})
+                  .exitCode,
+              0);
+    expectError(
+        [&] {
+            manager.add((bare / "refs").string(), "x");
+        },
+        "is inside the repo");
+    EXPECT_EQ(manager.add(bare.string(), "bare").repo.name, "bare");
+    EXPECT_EQ(manager.add(backend.dir().string(), "backend").repo.name, "backend");
+}
+
 TEST(RepoManager, FailedCloneLeavesNothing) {
     const TempDir home;
     const Workspace workspace(home.file("ws"));
@@ -273,7 +313,7 @@ TEST(RepoManager, SecondCommandWaitsForTheLock) {
     // Pretend another command is building: it holds the lock and has a file in tmp/.
     std::optional<FileLock> otherCommand;
     otherCommand.emplace(workspace.lockFile());
-    writeFile(workspace.tmpDir() / "other-build.idx", "in progress");
+    writeFile(workspace.tmpDir() / "r_00000001-g0001.idx", "in progress");
 
     std::atomic<bool> waited = false;
     std::future<void> adding = std::async(std::launch::async, [&] {
@@ -284,7 +324,7 @@ TEST(RepoManager, SecondCommandWaitsForTheLock) {
         manager.add(backend.dir().string(), "backend");
     });
     EXPECT_EQ(adding.wait_for(std::chrono::milliseconds(500)), std::future_status::timeout);
-    EXPECT_TRUE(std::filesystem::exists(workspace.tmpDir() / "other-build.idx"));
+    EXPECT_TRUE(std::filesystem::exists(workspace.tmpDir() / "r_00000001-g0001.idx"));
     EXPECT_TRUE(loadRegistry(workspace).repos.empty());
 
     otherCommand.reset();  // the other command finishes
@@ -694,9 +734,10 @@ TEST(RepoManager, SymlinkedFolderStopsAdd) {
     const Workspace workspace(home.file("ws"));
     TempRepo backend;
     fillBackend(backend);
-    std::filesystem::create_directories(workspace.root());
+    workspace.create();
     std::filesystem::create_directories(home.file("elsewhere"));
     writeFile(home.file("elsewhere") / "precious.txt", "keep me");
+    std::filesystem::remove(workspace.tmpDir());
     std::filesystem::create_directory_symlink(home.file("elsewhere"), workspace.tmpDir());
 
     expectError(
@@ -724,11 +765,12 @@ TEST(RepoManager, KilledRegistrySaveIsCleanedUp) {
               }),
               0);
     EXPECT_EQ(readFile(workspace.registryFile()), before);  // the old one is intact
-    EXPECT_EQ(namesIn(workspace.root()).size(), 6U);        // with the leftover
+    EXPECT_EQ(namesIn(workspace.root()).size(), 7U);        // with the leftover
 
     manager.remove("backend");  // any change cleans up first
     EXPECT_EQ(namesIn(workspace.root()),
-              (std::set<std::string>{"indexes", "lock", "registry.json", "repos", "tmp"}));
+              (std::set<std::string>{"code-search-workspace", "indexes", "lock", "registry.json",
+                                     "repos", "tmp"}));
 }
 
 TEST(RepoManager, KilledAddLeavesACompleteState) {

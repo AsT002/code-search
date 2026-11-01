@@ -1,5 +1,6 @@
 #include "codesearch/git/git_runner.hpp"
 
+#include <array>
 #include <string_view>
 
 namespace codesearch {
@@ -16,13 +17,56 @@ std::vector<std::string> gitArgs(const std::filesystem::path& dir,
 
 namespace {
 
+// Variables that tell Git which repo to use, and how, from
+// `git rev-parse --local-env-vars`. Git sets them for hooks and aliases, so
+// code-search run from one of those would get them too, and then -C and
+// --git-dir would be ignored: Git would read or write the repo they name.
+// They're left out of every Git we start.
+constexpr std::array<std::string_view, 15> kRepoEnvVars = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+};
+
+}  // namespace
+
+std::vector<std::string> gitEnv(const std::vector<std::string>& extraEnv) {
+    // Plain names, so the Process leaves them out.
+    std::vector<std::string> env(kRepoEnvVars.begin(), kRepoEnvVars.end());
+    env.insert(env.end(), extraEnv.begin(), extraEnv.end());
+    return env;
+}
+
+namespace {
+
 GitResult runGitProcess(const std::vector<std::string>& args,
                         const std::vector<std::string>& extraEnv = {}) {
     try {
-        return runProcess("git", args, extraEnv);
+        return runProcess("git", args, gitEnv(extraEnv));
     } catch (const ProcessStartError& error) {
         throw GitError(std::string(error.what()) + ". Is Git installed and on your PATH?");
     }
+}
+
+// `text` without the newline Git adds at the end. Only that one: a path can
+// hold newlines, since a folder name may.
+std::string withoutFinalNewline(std::string text) {
+    if (text.ends_with('\n')) {
+        text.pop_back();
+    }
+    return text;
 }
 
 // Git's error messages, without blank lines and its "Cloning into ..." progress line.
@@ -50,6 +94,28 @@ GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string
     return runGitProcess(gitArgs(dir, args));
 }
 
+std::filesystem::path repoTopFolder(const std::filesystem::path& dir) {
+    const GitResult bare = runGit(dir, {"rev-parse", "--is-bare-repository"});
+    if (bare.exitCode != 0) {
+        throw GitError("not a Git repository: " + dir.string());
+    }
+    // A bare repo has no work tree, so its top folder is the repo folder itself.
+    const bool isBare = withoutFinalNewline(bare.out) == "true";
+    const GitResult top =
+        runGit(dir, {"rev-parse", isBare ? "--absolute-git-dir" : "--show-toplevel"});
+    if (top.exitCode != 0) {
+        // The usual reason: `dir` is a repo's .git folder, or inside it.
+        throw GitError(dir.string() +
+                       " is inside a repo's .git folder. Use the repo's own folder instead");
+    }
+    std::error_code error;
+    std::filesystem::path path = std::filesystem::canonical(withoutFinalNewline(top.out), error);
+    if (error) {
+        throw GitError("can't find the top folder of the repo at " + dir.string());
+    }
+    return path;
+}
+
 void cloneShallow(const std::string& url, const std::filesystem::path& dest) {
     const std::vector<std::string> args = {
         "clone", "--bare", "--depth", "1", "--single-branch", "--no-tags", "--", url, dest.string(),
@@ -71,14 +137,9 @@ void fetchLatest(const std::filesystem::path& clone) {
     if (where.exitCode != 0) {
         throw GitError(clone.string() + " isn't a Git repository:\n" + errorLines(where.err));
     }
-    // Remove only the newline Git adds at the end. The path itself can hold
-    // newlines, since a folder name may.
-    std::string path = where.out;
-    if (path.ends_with('\n')) {
-        path.pop_back();
-    }
     std::error_code error;
-    const std::filesystem::path commonDir = std::filesystem::canonical(path, error);
+    const std::filesystem::path commonDir =
+        std::filesystem::canonical(withoutFinalNewline(where.out), error);
     if (error || commonDir != std::filesystem::canonical(clone)) {
         throw GitError("refusing to update " + clone.string() +
                        ": Git would write to another folder");

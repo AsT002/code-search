@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <string>
 
 namespace codesearch {
@@ -21,6 +22,28 @@ TEST(Process, ReturnsOutputErrorsAndExitCode) {
 
 TEST(Process, ReportsDeathBySignal) {
     EXPECT_EQ(runShell("kill -9 $$").exitCode, 128 + 9);
+}
+
+TEST(Process, ExtraEnvAddsReplacesAndDrops) {
+    // setenv isn't safe while other threads use the environment. This test
+    // starts none before the child.
+    ::setenv("CODE_SEARCH_TEST_KEEP", "ours", 1);  // NOLINT(concurrency-mt-unsafe)
+    ::setenv("CODE_SEARCH_TEST_DROP", "ours", 1);  // NOLINT(concurrency-mt-unsafe)
+    ::setenv("CODE_SEARCH_TEST_SET", "ours", 1);   // NOLINT(concurrency-mt-unsafe)
+    const std::string script =
+        "echo \"$CODE_SEARCH_TEST_KEEP,${CODE_SEARCH_TEST_DROP-unset},"
+        "$CODE_SEARCH_TEST_SET,$CODE_SEARCH_TEST_NEW\"";
+    EXPECT_EQ(runShell(script).out, "ours,ours,ours,\n");
+    const ProcessResult changed = runProcess(
+        "sh", {"-c", script},
+        {"CODE_SEARCH_TEST_DROP", "CODE_SEARCH_TEST_SET=theirs", "CODE_SEARCH_TEST_NEW=new"});
+    EXPECT_EQ(changed.out, "ours,unset,theirs,new\n");
+    // env prints every entry as it is, so a bare "NAME" entry would show up.
+    const std::string all = runProcess("env", {}, {"CODE_SEARCH_TEST_DROP"}).out;
+    EXPECT_EQ(all.find("CODE_SEARCH_TEST_DROP"), std::string::npos) << all;
+    ::unsetenv("CODE_SEARCH_TEST_KEEP");  // NOLINT(concurrency-mt-unsafe)
+    ::unsetenv("CODE_SEARCH_TEST_DROP");  // NOLINT(concurrency-mt-unsafe)
+    ::unsetenv("CODE_SEARCH_TEST_SET");   // NOLINT(concurrency-mt-unsafe)
 }
 
 TEST(Process, FailsToStartAMissingProgram) {

@@ -7,11 +7,12 @@ namespace codesearch {
 
 // The folder where code-search keeps its data:
 //
-//   registry.json   the repos and which index file is current for each
-//   lock            held during add, update, remove and cleanup
-//   repos/          clones we own (GitHub repos only)
-//   indexes/        index files
-//   tmp/            builds in progress
+//   code-search-workspace   marks the folder as ours
+//   registry.json           the repos and which index file is current for each
+//   lock                    held during add, update, remove and cleanup
+//   repos/                  clones we own (GitHub repos only)
+//   indexes/                index files
+//   tmp/                    builds in progress
 //
 // Only paths are worked out here. Nothing is read or written except by create().
 class Workspace {
@@ -23,6 +24,7 @@ public:
     static std::filesystem::path defaultRoot();
 
     const std::filesystem::path& root() const { return root_; }
+    std::filesystem::path markerFile() const { return root_ / "code-search-workspace"; }
     std::filesystem::path registryFile() const { return root_ / "registry.json"; }
     std::filesystem::path lockFile() const { return root_ / "lock"; }
     std::filesystem::path reposDir() const { return root_ / "repos"; }
@@ -34,8 +36,16 @@ public:
         return reposDir() / (id + ".git");
     }
 
-    // Creates the folders that don't exist yet, then checks them (checkFolders).
+    // Creates the folders and the marker file that don't exist yet, then
+    // checks the folders (checkFolders). Throws std::runtime_error first if
+    // the root already holds other files (checkRoot).
     void create() const;
+
+    // Throws std::runtime_error unless the root is missing, empty, or already
+    // a workspace (it has the marker file or registry.json). Cleanup deletes
+    // files in the workspace, so code-search must never move into a folder
+    // that holds someone else's files, like ~ itself.
+    void checkRoot() const;
 
     // Throws std::runtime_error unless each of repos/, indexes/ and tmp/ that
     // exists is a real folder directly inside the root, not a symlink. Cleanup

@@ -213,6 +213,7 @@ Each index stores two values that describe the rules used to build it:
 
 ```
 ~/.code-search/
+├── code-search-workspace    marks the folder as ours
 ├── registry.json            the repos and which index file is current for each
 ├── lock                     held during add, update, remove and cleanup
 ├── repos/                   clones we own (GitHub repos only)
@@ -225,6 +226,10 @@ Each index stores two values that describe the rules used to build it:
 ```
 
 The folder is `$CODE_SEARCH_HOME` if that's set, otherwise `~/.code-search`.
+It must be missing, empty, or already a workspace (it has
+`code-search-workspace`, or `registry.json` for workspaces made before the
+marker). Otherwise `add`, `update` and `remove` refuse to start, so pointing
+`$CODE_SEARCH_HOME` at a folder like `~` can't hand its `tmp/` to cleanup.
 
 - Files and folders are named by internal IDs like `r_7f3a90b1` (8 random hex
   digits). The name a user gives
@@ -237,6 +242,13 @@ The folder is `$CODE_SEARCH_HOME` if that's set, otherwise `~/.code-search`.
   or `-`. The default is the folder's or the GitHub repo's name.
 - A local repo's path is stored after following symlinks. Folders inside the
   workspace can't be added.
+- A local repo must be added by its top folder (`git rev-parse --show-toplevel`,
+  or `--absolute-git-dir` for a bare repo). Git finds a repo from any folder
+  inside it, so a subfolder would index the whole repo, and the same repo could
+  be added twice under two names.
+- Every Git we start runs without the variables `git rev-parse --local-env-vars`
+  lists, like `GIT_DIR` and `GIT_WORK_TREE`. Git sets them for hooks and
+  aliases, and they would override `-C` and `--git-dir`.
 
 `registry.json`:
 
@@ -383,12 +395,14 @@ lock and keep working while a change runs.
    into `indexes/`. Nothing points to it yet.
 4. Write the new registry to a temp file, fsync it, and rename it over the old one.
 5. Delete index files the registry no longer points to, clones of repos it
-   doesn't list, and anything in `tmp/`. Release the lock.
+   doesn't list, and builds left in `tmp/`. Release the lock.
 
 If a step fails, the same cleanup runs right away against the registry on
 disk. Cleanup first checks that `tmp/`, `indexes/` and `repos/` are real
 folders inside the workspace, not symlinks, and stops with an error if not. It
-only deletes entries directly inside them, checks that after following
+only deletes names code-search makes (`r_7f3a90b1-g0001.idx`, its
+`.tmp-XXXXXX` file while it's written, and `r_7f3a90b1.git`), and leaves
+anything else alone. It only deletes entries directly inside the folders, checks that after following
 symlinks, and deletes a symlink itself, never what it points to. It also
 deletes `registry.json.tmp-*` files, which a registry save killed partway
 leaves next to `registry.json`.

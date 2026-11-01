@@ -61,6 +61,13 @@ Source resolveSource(const std::string& text, const Workspace& workspace) {
         throw std::runtime_error("can't add a folder inside code-search's own data folder " +
                                  workspace.root().string());
     }
+    // Git finds the repo from any folder inside it, so a subfolder would
+    // index the whole repo, and could add the same repo twice.
+    const std::filesystem::path top = repoTopFolder(path);
+    if (top != path) {
+        throw std::runtime_error(path.string() + " is inside the repo " + top.string() + ". Add " +
+                                 top.string() + " instead");
+    }
     return Source{
         .kind = RepoSource::Local,
         .location = path.string(),

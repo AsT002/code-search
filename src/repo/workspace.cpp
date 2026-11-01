@@ -2,10 +2,17 @@
 
 #include <cstdlib>
 #include <stdexcept>
+#include <string_view>
+
+#include "codesearch/util/atomic_file.hpp"
 
 namespace codesearch {
 
 namespace {
+
+constexpr std::string_view kMarkerText =
+    "This folder holds code-search's data. code-search deletes files it made\n"
+    "here, so don't keep anything else in it.\n";
 
 // The value of an environment variable, or "" if it isn't set.
 std::string envValue(const char* name) {
@@ -32,11 +39,39 @@ std::filesystem::path Workspace::defaultRoot() {
 }
 
 void Workspace::create() const {
+    checkRoot();
     // create_directories does nothing for folders that already exist.
+    std::filesystem::create_directories(root_);
+    // The marker goes in first, so the folder is never left with our files
+    // in it but no marker.
+    if (!std::filesystem::exists(markerFile())) {
+        writeFileAtomically(markerFile(), kMarkerText);
+    }
     std::filesystem::create_directories(reposDir());
     std::filesystem::create_directories(indexesDir());
     std::filesystem::create_directories(tmpDir());
     checkFolders();
+}
+
+void Workspace::checkRoot() const {
+    if (!std::filesystem::exists(root_)) {
+        return;
+    }
+    if (!std::filesystem::is_directory(root_)) {
+        throw std::runtime_error(root_.string() + " isn't a folder");
+    }
+    // registry.json: a workspace made before the marker file existed.
+    if (std::filesystem::exists(markerFile()) || std::filesystem::exists(registryFile())) {
+        return;
+    }
+    // A default-constructed directory_iterator is the end of any folder, so
+    // this checks the folder has nothing in it.
+    if (std::filesystem::directory_iterator(root_) == std::filesystem::directory_iterator()) {
+        return;
+    }
+    throw std::runtime_error(root_.string() +
+                             " already has files in it, and isn't a code-search folder. Set "
+                             "CODE_SEARCH_HOME to a new or empty folder");
 }
 
 void Workspace::checkFolders() const {
