@@ -184,6 +184,20 @@ MemoryIndex manyFiles(int count) {
     return builder.build();
 }
 
+// Plays a slow reader of results: waits until the pool has made all it's
+// allowed to make, that is until the memory in use stops changing. That
+// doesn't depend on how busy the machine is, like a fixed pause would.
+void waitForThePoolToSettle() {
+    std::size_t last = gLive;
+    int unchanged = 0;
+    for (int i = 0; i < 1000 && unchanged < 10; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const std::size_t now = gLive;
+        unchanged = now == last ? unchanged + 1 : 0;
+        last = now;
+    }
+}
+
 // "repo:path" for each file found, in order.
 std::vector<std::string> found(std::span<const SearchTarget> targets, const SearchRequest& request,
                                SearchStatus* status = nullptr) {
@@ -448,13 +462,110 @@ TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
     gCounting = true;
     const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& /*file*/) {
         if (++files == 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            waitForThePoolToSettle();
         }
     });
     gCounting = false;
     EXPECT_EQ(status, SearchStatus::Complete);
     EXPECT_EQ(files, 128U);
     EXPECT_LT(gPeak - before, std::size_t{64} << 20U) << "most bytes live at once";
+}
+
+// Results sizes measured so far can mislead: here the first 64 files have
+// no matches, so the files after them looked cheap, and the pool took on
+// hundreds of files where every line matches (about 100 MiB). What's held
+// must be limited by the bytes actually made, not by a guess.
+TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
+    IndexBuilder builder;
+    const std::string none(std::size_t{32} << 10U, 'x');
+    std::string dense;
+    for (int n = 0; n < 1024; ++n) {
+        dense += std::string(31, 'e') + "\n";
+    }
+    for (int i = 0; i < 64; ++i) {
+        builder.add("a" + std::to_string(i), none);
+    }
+    for (int i = 0; i < 256; ++i) {
+        builder.add("b" + std::to_string(i), dense);
+    }
+    const MemoryIndex index = builder.build();
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("e");
+    request.pool = &pool;
+
+    std::vector<std::string> paths;
+    SearchStatus status = SearchStatus::Cancelled;
+    const std::size_t before = gLive;
+    gPeak = before;
+    gCounting = true;
+    // Tasks stop partway when too much is held, and the rest of their files
+    // are checked later. If that ever stopped moving, this would hang.
+    testing::failIfItHangs([&] {
+        status = searchRepos(targets, request, [&](const ResultFile& file) {
+            paths.push_back(file.path);
+            if (paths.size() == 1) {
+                waitForThePoolToSettle();
+            }
+        });
+    });
+    gCounting = false;
+    EXPECT_EQ(status, SearchStatus::Complete);
+    std::vector<std::string> expected;
+    expected.reserve(256);
+    for (int i = 0; i < 256; ++i) {
+        expected.push_back("b" + std::to_string(i));
+    }
+    EXPECT_EQ(paths, expected);  // all of them, in order
+    // 32 MiB of results waiting, plus what 4 threads hold for the file each
+    // is working on.
+    EXPECT_LT(gPeak - before, std::size_t{56} << 20U) << "most bytes live at once";
+}
+
+// The chunk the caller waits for must check a file even when chunks after
+// it already hold the most allowed: those can't be taken before it, so
+// otherwise nothing would ever move again. Here a slow file holds up an
+// early chunk while the later chunks fill up the limit.
+TEST(SearchReposOnAPool, KeepsMovingWhenLaterChunksHoldTheLimit) {
+    std::string dense;
+    for (int n = 0; n < 2048; ++n) {
+        dense += std::string(31, 'e') + "\n";
+    }
+    IndexBuilder builder;
+    for (int i = 0; i < 5; ++i) {
+        builder.add("a" + std::to_string(i), "xxx");  // no match
+    }
+    for (int i = 0; i < 80; ++i) {
+        builder.add("b" + std::to_string(i), dense);
+    }
+    const MemoryIndex inner = builder.build();
+    class SlowFile : public CountingIndex {
+    public:
+        using CountingIndex::CountingIndex;
+        void withContent(DocId doc,
+                         const std::function<void(std::string_view)>& fn) const override {
+            if (doc == 4) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            CountingIndex::withContent(doc, fn);
+        }
+    };
+    const SlowFile index(inner);
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(4);
+    SearchRequest request;
+    request.query = literal("e");
+    request.pool = &pool;
+    std::size_t files = 0;
+    SearchStatus status = SearchStatus::Cancelled;
+    testing::failIfItHangs([&] {
+        status = searchRepos(targets, request, [&](const ResultFile& /*file*/) {
+            ++files;
+        });
+    });
+    EXPECT_EQ(status, SearchStatus::Complete);
+    EXPECT_EQ(files, 80U);
 }
 
 // Cancelled partway through the last chunk, before any file in it matched:

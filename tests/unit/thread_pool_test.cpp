@@ -5,6 +5,18 @@
 #include <atomic>
 #include <system_error>
 
+// Defined when built with ThreadSanitizer, which can't track thousands of
+// threads. GCC says so with __SANITIZE_THREAD__, Clang with __has_feature.
+// GCC has no __has_feature, so it gets its own #if: even behind a false
+// defined() check, GCC would fail to read it.
+#ifdef __SANITIZE_THREAD__
+#define CODESEARCH_UNDER_TSAN
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CODESEARCH_UNDER_TSAN
+#endif
+#endif
+
 namespace codesearch {
 namespace {
 
@@ -28,7 +40,7 @@ TEST(ThreadPool, RunsEveryTaskBeforeStopping) {
 TEST(ThreadPool, TooManyThreadsIsAnError) {
 #ifndef __APPLE__
     GTEST_SKIP() << "relies on macOS's limit of 4096 threads per process";
-#elif defined(__has_feature) && __has_feature(thread_sanitizer)
+#elif defined(CODESEARCH_UNDER_TSAN)
     GTEST_SKIP() << "ThreadSanitizer can't track this many threads";
 #else
     EXPECT_THROW(ThreadPool(100000), std::system_error);
@@ -41,7 +53,7 @@ TEST(StartPool, GivesNoPoolForOneThreadOrWhenThreadsRunOut) {
     const std::unique_ptr<ThreadPool> pool = startPool(3);
     ASSERT_NE(pool, nullptr);
     EXPECT_EQ(pool->size(), 3U);
-#if defined(__APPLE__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__APPLE__) && !defined(CODESEARCH_UNDER_TSAN)
     EXPECT_EQ(startPool(100000), nullptr);  // over macOS's 4096 threads per process
 #endif
 }

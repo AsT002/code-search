@@ -259,7 +259,8 @@ constexpr std::size_t kChunksPerThread = 4;
 
 // About the most bytes of results the pool may hold that the caller hasn't
 // taken yet, finished or still being made. Without it, a search where every
-// line matches could hold the results of hundreds of files at once.
+// line matches could hold the results of hundreds of files at once. It can
+// go over by what each thread makes for the file it's on.
 constexpr std::size_t kMaxHeldBytes = std::size_t{32} << 20U;  // 32 MiB
 
 // Searches the repos on a thread pool. The files are checked in chunks by
@@ -267,10 +268,19 @@ constexpr std::size_t kMaxHeldBytes = std::size_t{32} << 20U;  // 32 MiB
 // order and turns them into results. So the results come out in the same
 // order as searchInTurn gives, and the limit works the same way.
 //
-// Chunks are made as they're handed out. Their size comes from how big each
-// file's results have been so far, so that what's held stays near
-// kMaxHeldBytes: 16 files normally, down to 1 when every line matches. The
-// first chunk on each thread has one file, to find out.
+// What's held is kept near kMaxHeldBytes in two ways:
+//
+// - The bytes of results are counted as they're made. Once the limit is
+//   reached, no more chunks are handed out, and a task stops at the next
+//   file; the rest of its chunk goes back in line, to be checked next. The
+//   chunk the caller is waiting for always checks at least one file, so the
+//   search keeps moving. This holds however the files change.
+// - Chunks are only handed out while the results so far, plus what the
+//   files already handed out will likely add at the average size so far,
+//   fit. Chunks are sized the same way: 16 files normally, down to 1 when
+//   every line matches. The first chunk on each thread has one file, to
+//   find out. This keeps the threads from all being partway through big
+//   files when the limit is reached.
 class ParallelSearch {
 public:
     ParallelSearch(std::span<const SearchTarget> targets, const SearchRequest& request,
@@ -322,17 +332,22 @@ private:
         std::size_t begin = 0;  // a range of the repo's candidates
         std::size_t end = 0;
         std::vector<Found> found;
-        std::size_t bytes = 0;     // about how much memory `found` holds
-        bool cutShort = false;     // stopped early because of cancelling
-        std::exception_ptr error;  // what went wrong, if anything
-        bool done = false;         // guarded by mutex_
+        std::size_t bytes = 0;  // about how much memory `found` holds
+        bool cutShort = false;  // stopped early because of cancelling
+        // Stopped early because too much was held; `end` is where it
+        // stopped, and the rest goes up to `plannedEnd`.
+        bool stoppedForMemory = false;
+        std::size_t plannedEnd = 0;
+        bool checkOneAnyway = false;  // the caller is waiting for this one
+        std::exception_ptr error;     // what went wrong, if anything
+        bool done = false;            // guarded by mutex_
     };
 
     void prepare();
     void fill();
     bool moreToHandOut() const { return nextRepo_ < repos_.size(); }
     std::size_t nextChunkFiles();
-    void submit(std::unique_ptr<Chunk> chunk);
+    void submit(std::unique_ptr<Chunk> chunk, bool next = false);
     void check(Chunk& chunk);
     bool pass(const Repo& repo, Found& found, std::size_t& remaining);
     bool cancelled() const { return request_.cancelled != nullptr && request_.cancelled->load(); }
@@ -353,10 +368,12 @@ private:
     // All guarded by mutex_:
     std::size_t submitted_ = 0;
     std::size_t finished_ = 0;
-    std::size_t heldBytes_ = 0;     // in chunks that are done and not taken yet
-    std::size_t filesRunning_ = 0;  // in chunks handed to the pool, not done yet
-    std::size_t bytesSeen_ = 0;     // in all finished chunks, for the estimate
+    std::size_t bytesSeen_ = 0;  // in all finished chunks, for sizing chunks
     std::size_t filesSeen_ = 0;
+    std::size_t filesRunning_ = 0;  // in chunks handed to the pool, not done yet
+    // Bytes of results made and not taken by the caller yet, counted as each
+    // file's result is made.
+    std::atomic<std::size_t> heldBytes_ = 0;
     std::atomic<bool> stop_ = false;  // tells running tasks to end early
 };
 
@@ -418,16 +435,22 @@ void ParallelSearch::fill() {
             nextCandidate_ = 0;
             continue;
         }
+        if (!pending_.empty() && heldBytes_ >= kMaxHeldBytes) {
+            return;  // wait for the caller to take some
+        }
         const std::size_t files = nextChunkFiles();
         {
             const std::scoped_lock lock(mutex_);
             if (filesSeen_ == 0 && pending_.size() >= request_.pool->size()) {
                 return;  // no size to go by yet; wait for the first chunk
             }
+            // Also count what the files already handed out will likely add,
+            // by the average so far. That keeps threads from all being
+            // partway through big files when the limit is reached.
             const std::size_t perFile = filesSeen_ == 0 ? 0 : bytesSeen_ / filesSeen_;
             const std::size_t expected = heldBytes_ + (perFile * (filesRunning_ + files));
             if (!pending_.empty() && expected > kMaxHeldBytes) {
-                return;  // more would go over; wait for the caller to take some
+                return;
             }
         }
         chunk->begin = nextCandidate_;
@@ -437,10 +460,16 @@ void ParallelSearch::fill() {
     }
 }
 
-void ParallelSearch::submit(std::unique_ptr<Chunk> chunk) {
+// Hands a chunk to the pool, last in line, or first if `next` is set.
+void ParallelSearch::submit(std::unique_ptr<Chunk> chunk, bool next) {
     Chunk* task = chunk.get();
+    task->plannedEnd = task->end;
+    if (next) {
+        pending_.push_front(std::move(chunk));
+    } else {
+        pending_.push_back(std::move(chunk));
+    }
     const std::size_t files = task->end - task->begin;
-    pending_.push_back(std::move(chunk));
     {
         const std::scoped_lock lock(mutex_);
         ++submitted_;
@@ -458,7 +487,11 @@ void ParallelSearch::submit(std::unique_ptr<Chunk> chunk) {
             --submitted_;
             filesRunning_ -= files;
         }
-        pending_.pop_back();
+        if (next) {
+            pending_.pop_front();
+        } else {
+            pending_.pop_back();
+        }
         throw;
     }
 }
@@ -481,6 +514,12 @@ void ParallelSearch::check(Chunk& chunk) {
         for (std::size_t i = chunk.begin; i < chunk.end; ++i) {
             if (stop_ || cancelled()) {
                 chunk.cutShort = true;
+                break;
+            }
+            const bool mustCheck = i == chunk.begin && chunk.checkOneAnyway;
+            if (!mustCheck && heldBytes_ >= kMaxHeldBytes) {
+                chunk.stoppedForMemory = true;
+                chunk.end = i;  // the caller hands out the rest later
                 break;
             }
             const DocId doc = repo.candidates[i];
@@ -506,8 +545,10 @@ void ParallelSearch::check(Chunk& chunk) {
                         found.matches = firstLines(matches, kept);
                     }
                 }
-                chunk.bytes += bytesOf(found.path, found.matches, found.lines);
+                const std::size_t bytes = bytesOf(found.path, found.matches, found.lines);
                 chunk.found.push_back(std::move(found));
+                chunk.bytes += bytes;
+                heldBytes_ += bytes;
             });
         }
     } catch (...) {  // a task must not throw; run() passes it on
@@ -519,8 +560,7 @@ void ParallelSearch::check(Chunk& chunk) {
     const std::scoped_lock lock(mutex_);
     chunk.done = true;
     ++finished_;
-    filesRunning_ -= chunk.end - chunk.begin;
-    heldBytes_ += chunk.bytes;
+    filesRunning_ -= chunk.plannedEnd - chunk.begin;
     bytesSeen_ += chunk.bytes;
     filesSeen_ += chunk.end - chunk.begin;
     chunkDone_.notify_all();
@@ -594,11 +634,19 @@ SearchStatus ParallelSearch::run() {
         if (chunk.cutShort) {
             return SearchStatus::Cancelled;
         }
-        {
-            const std::scoped_lock lock(mutex_);
-            heldBytes_ -= chunk.bytes;
+        heldBytes_ -= chunk.bytes;
+        if (chunk.stoppedForMemory) {
+            // The rest of the chunk comes next, before anything after it.
+            auto rest = std::make_unique<Chunk>();
+            rest->repo = chunk.repo;
+            rest->begin = chunk.end;
+            rest->end = chunk.plannedEnd;
+            rest->checkOneAnyway = true;
+            pending_.pop_front();
+            submit(std::move(rest), true);
+        } else {
+            pending_.pop_front();
         }
-        pending_.pop_front();
         fill();
     }
     return SearchStatus::Complete;

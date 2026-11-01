@@ -560,9 +560,14 @@ order as with one thread, and the limit cuts them at the same place.
 Memory stays bounded however slowly the results are read:
 
 - At most 4 chunks per thread are in flight.
-- Results not taken yet are kept to about 32 MiB. Each chunk's size (16
-  files, down to 1) comes from the result size per file seen so far, and the
-  first chunk on each thread has 1 file, to find out.
+- Results not taken yet are kept to about 32 MiB, counted as they're made.
+  Once that's reached, no more chunks are handed out, and a task stops at
+  the next file; the rest of its chunk is checked next. The chunk the caller
+  waits for always checks at least one file, so the search keeps moving.
+- Chunks are also sized and handed out by the result size per file seen so
+  far (16 files, down to 1), so the threads aren't all partway through big
+  files when the limit is reached. The first chunk on each thread has 1
+  file, to find out.
 - With a limit, a file's result never has more lines than the limit.
 
 Damage found in a repo, and cancelling, show up when the results get there,

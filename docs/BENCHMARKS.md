@@ -255,16 +255,21 @@ process):
 |---------|------:|
 | One thread (stage 2) | 54 MiB |
 | The pool, as first committed | 1342 MiB |
-| The pool, with all three limits below | 213 MiB |
-| With only the 32 MiB budget | 599 MiB |
-| With only chunks sized by result size | 319 MiB |
+| The pool, with the limits below | 188 to 214 MiB |
 
-The pool now keeps results the caller hasn't taken to about 32 MiB, sizes
-each chunk from the result size per file seen so far (16 files normally,
-down to 1), and starts with one 1-file chunk per thread, until there's a
-size to go by. The rest of the 213 MiB is each of 8 threads holding one
-file's matches while it works on it. The speed of the benchmark queries
-didn't change.
+The pool keeps results the caller hasn't taken to about 32 MiB, counting
+the bytes as they're made: a task stops at the next file once that's
+reached, and the rest of its chunk is checked next. It also sizes and hands
+out chunks by the result size per file seen so far (16 files normally, down
+to 1), and starts with one 1-file chunk per thread, until there's a size to
+go by. The rest of the memory is each of 8 threads holding one file's
+matches while it works on it. The speed of the benchmark queries didn't
+change.
+
+The first version of this fix relied on the sizes seen so far alone. A
+second review showed why that isn't enough: after 64 files without matches,
+files where every line matches looked cheap, and a test of that held about
+65 MiB with 4 threads. Counting the bytes made keeps that test at 38 MiB.
 
 ### Targets
 
