@@ -47,8 +47,10 @@ def clone(url, commit, dest):
             sys.exit(f"{dest} isn't a checkout of {commit}. Remove it to clone it again")
         # code-search indexes the commit, but rg and git grep read the files
         # on disk, so they must be the same: no changed or untracked files.
-        status = subprocess.run(["git", "-C", str(dest), "status", "--porcelain"], capture_output=True,
-                                text=True, check=True).stdout
+        # --untracked-files=all: list untracked files even if the repo's
+        # status.showUntrackedFiles setting would hide them.
+        status = subprocess.run(["git", "-C", str(dest), "status", "--porcelain", "--untracked-files=all"],
+                                capture_output=True, text=True, check=True).stdout
         if status:
             sys.exit(f"{dest} has changes, so rg and git grep would search other files than "
                      f"code-search:\n{status}Undo them, or remove it to clone it again")
