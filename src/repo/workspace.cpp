@@ -46,7 +46,15 @@ void Workspace::create() const {
     // exists as soon as it's opened, so even a write killed halfway leaves
     // it there. Only its name matters, never its text.
     if (!std::filesystem::exists(markerFile())) {
-        std::ofstream(markerFile()) << kMarkerText;
+        std::ofstream marker(markerFile());
+        marker << kMarkerText;
+        marker.close();
+        // A stream doesn't throw on its own. If the marker couldn't be made,
+        // stop before the folders below, which would leave the folder
+        // nonempty but unmarked, and refused from then on.
+        if (marker.fail()) {
+            throw std::runtime_error("could not create " + markerFile().string());
+        }
     }
     std::filesystem::create_directories(reposDir());
     std::filesystem::create_directories(indexesDir());

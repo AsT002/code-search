@@ -1,6 +1,7 @@
 #include "codesearch/repo/publisher.hpp"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <filesystem>
 #include <set>
@@ -9,6 +10,7 @@
 #include "../support/temp_dir.hpp"
 #include "../support/test_ids.hpp"
 #include "codesearch/index/shard_reader.hpp"
+#include "codesearch/util/process.hpp"
 
 namespace codesearch {
 namespace {
@@ -215,6 +217,30 @@ TEST(Workspace, RecoversFromAKilledFirstAdd) {
     cleanUp(older, Registry{});
     EXPECT_EQ(namesIn(older.root()),
               (std::set<std::string>{"code-search-workspace", "indexes", "repos", "tmp"}));
+}
+
+// If the marker can't be made, no folders may be made either, or the next
+// try would find a nonempty folder with no marker and refuse it for good.
+TEST(Workspace, NoMarkerMeansNoFolders) {
+#ifndef __APPLE__
+    GTEST_SKIP() << "needs macOS ACLs to deny files but allow folders";
+#else
+    if (::geteuid() == 0) {
+        GTEST_SKIP() << "root ignores ACLs";
+    }
+    const TempDir dir;
+    const Workspace workspace(dir.file("ws"));
+    std::filesystem::create_directories(workspace.root());
+    // An ACL that refuses new files in the folder but still allows folders.
+    const std::string rule = "everyone deny add_file";
+    ASSERT_EQ(runProcess("chmod", {"+a", rule, workspace.root().string()}).exitCode, 0);
+    EXPECT_THROW(workspace.create(), std::runtime_error);
+    EXPECT_TRUE(namesIn(workspace.root()).empty());
+
+    ASSERT_EQ(runProcess("chmod", {"-a", rule, workspace.root().string()}).exitCode, 0);
+    workspace.create();  // works once files are allowed again
+    EXPECT_TRUE(std::filesystem::exists(workspace.markerFile()));
+#endif
 }
 
 TEST(Publisher, CleanUpWithoutFoldersDoesNothing) {
