@@ -3,9 +3,12 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <filesystem>
 #include <set>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "../support/temp_dir.hpp"
 #include "../support/test_ids.hpp"
@@ -210,6 +213,33 @@ TEST(Workspace, TakesANewOrEmptyFolderOrAnOldWorkspace) {
     writeFile(old.registryFile(), registryToJson(Registry{}));
     old.create();
     EXPECT_TRUE(std::filesystem::exists(old.markerFile()));
+}
+
+// Two commands run at once can both create the workspace. One may make the
+// marker and folders while the other is checking the folder is empty;
+// those are ours, so it must not refuse the folder.
+TEST(Workspace, CommandsCanCreateItAtTheSameTime) {
+    const TempDir dir;
+    std::atomic<int> failures = 0;
+    for (int round = 0; round < 200; ++round) {
+        const Workspace workspace(dir.file("ws" + std::to_string(round)));
+        std::filesystem::create_directories(workspace.root());
+        std::vector<std::thread> commands;
+        commands.reserve(4);
+        for (int i = 0; i < 4; ++i) {
+            commands.emplace_back([&] {
+                try {
+                    workspace.create();
+                } catch (const std::runtime_error&) {
+                    ++failures;
+                }
+            });
+        }
+        for (std::thread& command : commands) {
+            command.join();
+        }
+    }
+    EXPECT_EQ(failures, 0);
 }
 
 // A first add killed while it writes the marker must not lock the folder

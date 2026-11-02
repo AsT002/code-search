@@ -3,9 +3,13 @@
 #include "../support/allocations.hpp"
 
 #include <gtest/gtest.h>
+#include <sys/wait.h>
 
 #include <csignal>
+#include <cstddef>
 #include <cstdlib>
+#include <filesystem>
+#include <iterator>
 #include <new>
 #include <string>
 #include <thread>
@@ -35,6 +39,39 @@ TEST(Process, RunningOutOfMemoryForErrorOutputIsReported) {
     EXPECT_THROW(runShell(command), std::bad_alloc);
     gFailIn = 0;
     EXPECT_EQ(runShell(command).err, std::string(200, '0'));
+}
+
+// How many file descriptors this program has open, as /dev/fd lists them.
+std::ptrdiff_t openFds() {
+    return std::distance(std::filesystem::directory_iterator("/dev/fd"),
+                         std::filesystem::directory_iterator());
+}
+
+// Makes each allocation in starting a Process fail in turn, up to the one
+// that starts the error output's thread, after the child is running. Each
+// failure must leave no descriptor open and no child behind.
+TEST(Process, FailingToStartLeavesNothingBehind) {
+    gMainThread = std::this_thread::get_id();
+    const std::ptrdiff_t fdsBefore = openFds();
+    bool started = false;
+    for (long n = 1; !started && n < 1000; ++n) {
+        // Allocations fail only on threads other than gMainThread.
+        std::thread([&] {
+            gFailIn = n;
+            try {
+                const Process process("cat", {});
+                gFailIn = 0;
+                started = true;
+            } catch (const std::bad_alloc&) {  // NOLINT(bugprone-empty-catch) expected
+            }
+            gFailIn = 0;
+        }).join();
+        EXPECT_EQ(openFds(), fdsBefore) << "failing allocation " << n;
+        int status = 0;
+        // -1 if there's no child at all, running or waiting to be reaped.
+        EXPECT_EQ(::waitpid(-1, &status, WNOHANG), -1) << "failing allocation " << n;
+    }
+    EXPECT_TRUE(started);
 }
 
 TEST(Process, ReportsDeathBySignal) {

@@ -234,10 +234,24 @@ Process::Process(const std::string& program, const std::vector<std::string>& arg
     stdoutFd_ = take(out.readEnd);
     const int stderrFd = take(err.readEnd);
 
-    // Read the error output on its own thread until the child closes it.
-    // An exception can't leave a thread (it would end the program), so if
-    // memory runs out, that's noted for errorOutput() to report, and the
-    // rest is read and dropped, so the child never blocks on a full pipe.
+    // Starting the thread can throw. A constructor that throws gets no
+    // destructor call, so then this stops the child, closes our ends and
+    // waits for it here.
+    try {
+        startStderrReader(stderrFd);
+    } catch (...) {
+        ::close(stderrFd);
+        ::kill(pid_, SIGKILL);
+        wait();
+        throw;
+    }
+}
+
+// Reads the error output on its own thread until the child closes it.
+// An exception can't leave a thread (it would end the program), so if
+// memory runs out, that's noted for errorOutput() to report, and the rest
+// is read and dropped, so the child never blocks on a full pipe.
+void Process::startStderrReader(int stderrFd) {
     stderrReader_ = std::thread([this, stderrFd] {
         std::array<char, 4096> chunk{};
         while (true) {

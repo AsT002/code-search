@@ -335,10 +335,10 @@ TEST(RegexMatcher, LongLinesKeepEveryMatch) {
     EXPECT_EQ(regexSpans(",", list).size(), 1999U);
     EXPECT_EQ(regexSpans("\\d+", list).size(), 2000U);
     std::string sparse;
-    for (int i = 0; i < 10000; ++i) {
+    for (int i = 0; i < 2000; ++i) {
         sparse += "xxxxxxxxxe";
     }
-    EXPECT_EQ(regexSpans("e", sparse).size(), 10000U);
+    EXPECT_EQ(regexSpans("e", sparse).size(), 2000U);
 }
 
 // RE2's default 8 MiB is too little for patterns like

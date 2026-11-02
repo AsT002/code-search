@@ -73,6 +73,8 @@ public:
 private:
     // Reads more output into buffer_. Returns false at the end of the output.
     bool fill();
+    // Starts stderrReader_, which reads `stderrFd` into stderr_ and closes it.
+    void startStderrReader(int stderrFd);
 
     std::string program_;  // for error messages
     pid_t pid_ = -1;

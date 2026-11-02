@@ -86,11 +86,14 @@ void Workspace::checkRoot() const {
     }
     // Empty, apart from what an earlier version left if it was killed while
     // writing the marker with AtomicFile: "code-search-workspace.tmp-XXXXXX".
-    // Cleanup deletes those.
+    // Cleanup deletes those. Another code-search may be creating the
+    // workspace right now, so a file found is checked against the marker
+    // again: create() makes the marker before anything else.
     const std::string leftover = markerFile().filename().string() + ".tmp-";
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(root_)) {
-        if (!entry.path().filename().string().starts_with(leftover)) {
+        if (!entry.path().filename().string().starts_with(leftover) &&
+            !std::filesystem::exists(markerFile())) {
             throw std::runtime_error(
                 root_.string() +
                 " already has files in it, and isn't a code-search folder. Set "
