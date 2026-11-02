@@ -487,7 +487,7 @@ is a breaking change.
 | Queries with no search text, like `lang:go` or `-foo` | Return matching files, with nothing highlighted |
 | What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
-| `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` stops at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
+| `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` and `\C+` stop at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
 | What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message |
 | Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. On a line longer than 1,024 bytes with very many matches, highlighting can stop partway along it (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
@@ -687,6 +687,13 @@ hang a search. `RegexMatcher` compiles each pattern once, as `(?m)pattern` so
 `^` and `$` work per line, with RE2's `never_nl` so no match takes in a line
 ending. There's no group around the pattern: a `\Q` without `\E` would
 quote its `)`.
+
+`never_nl` doesn't stop `\C`, which matches any one byte, from matching a
+`\n`. So a regex with `\C` (found by walking RE2's parse tree) is searched
+one line at a time: each search ends at its line's end, while RE2 still sees
+the text around the line for `^`, `$` and `\b`. A `\C` match can also
+start inside a UTF-8 character, so after an empty match the search moves on
+by one byte instead of one character.
 
 Each search for a match is linear, but finding every match on a line can
 take time growing with the square of the line's length: for `/a*z|a/` on a

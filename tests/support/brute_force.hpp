@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,18 @@ struct BruteFile {
     std::vector<BruteLine> lines;  // empty if there's nothing to highlight
     friend bool operator==(const BruteFile&, const BruteFile&) = default;
 };
+
+// So a failed EXPECT_EQ shows "r0:a.py 3[1,4)" instead of raw bytes.
+inline void PrintTo(const BruteFile& file,
+                    std::ostream* out) {  // NOLINT(readability-identifier-naming) gtest's name
+    *out << file.repo << ':' << file.path;
+    for (const BruteLine& line : file.lines) {
+        *out << ' ' << line.number;
+        for (const Span span : line.matches) {
+            *out << '[' << span.begin << ',' << span.end << ')';
+        }
+    }
+}
 
 // The slow version of searchRepos, for any query: every repo, every file,
 // in order. lang: only knows .go, .py and Makefile, the names tests use.

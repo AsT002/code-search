@@ -45,6 +45,7 @@ public:
 
 private:
     std::shared_ptr<const re2::RE2> re_;
+    bool anyByte_ = false;  // see matchesAnyByte in the .cpp
 };
 
 }  // namespace codesearch

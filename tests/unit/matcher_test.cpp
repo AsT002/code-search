@@ -170,6 +170,23 @@ TEST(RegexMatcher, MatchesStayWithinALine) {
     EXPECT_EQ(regexSpans("[^x]+", "ab\ncd"), (std::vector<Span>{{0, 2}, {3, 5}}));
 }
 
+// \C matches any one byte, and never_nl doesn't stop it at a '\n', so a
+// regex with \C is searched one line at a time. ^, $ and \b still see the
+// lines around it.
+TEST(RegexMatcher, AnyByteStaysWithinALine) {
+    EXPECT_FALSE(RegexMatcher("a\\Cb", true).foundIn("a\nb"));
+    EXPECT_TRUE(regexSpans("a\\Cb", "a\nb").empty());
+    EXPECT_TRUE(RegexMatcher("a\\Cb", true).foundIn("a\nb\naxb"));
+    EXPECT_EQ(regexSpans("a\\Cb", "a\nb\naxb"), (std::vector<Span>{{4, 7}}));
+    EXPECT_EQ(regexSpans("\\C+", "ab\ncd"), (std::vector<Span>{{0, 2}, {3, 5}}));
+    EXPECT_EQ(regexSpans("\\C$", "ab\ncd"), (std::vector<Span>{{1, 2}, {4, 5}}));
+    EXPECT_EQ(regexSpans("^\\C", "ab\ncd"), (std::vector<Span>{{0, 1}, {3, 4}}));
+    EXPECT_EQ(regexSpans("\\C\\b", "ab cd"), (std::vector<Span>{{1, 2}, {2, 3}, {4, 5}}));
+    // A \C match can start inside a character: after the empty match at
+    // the start of é, the next one starts at é's second byte.
+    EXPECT_EQ(regexSpans("\\C?z|", "\xC3\xA9z"), (std::vector<Span>{{1, 3}}));
+}
+
 // Finding every match could take time growing with the square of a line's
 // length: for /a*z|/ on a line of a's, each search looks to the line's end
 // for a z. The work is capped, so this takes milliseconds, not minutes.
@@ -186,6 +203,21 @@ TEST(RegexMatcher, FindingAllMatchesStaysFast) {
         const auto seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         EXPECT_LT(seconds, 20.0);
+    }
+    // Short lines get no budget, which is safe only if no search runs past
+    // its line. With \C one could, unless it's held to its line.
+    std::string shortLines;
+    for (int i = 0; i < 20000; ++i) {
+        shortLines += "aaaaaaaaa\n";
+    }
+    for (const std::string_view pattern : {"\\C*z|", "\\C*z|a"}) {
+        SCOPED_TRACE(pattern);
+        const auto start = std::chrono::steady_clock::now();
+        const std::size_t found = regexSpans(pattern, shortLines).size();
+        const auto seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        EXPECT_LT(seconds, 20.0);
+        EXPECT_EQ(found, pattern.ends_with('a') ? 180000U : 0U);
     }
     // Lines of up to 1,024 bytes are never cut short, however dense the
     // matches. On a longer line, very dense matches can be.

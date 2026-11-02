@@ -44,9 +44,9 @@ constexpr std::array<std::string_view, 7> kFoldingPieces = {
     "k", "K", "\xE2\x84\xAA", "s", "\xC5\xBF", "\xC3\xA9", "\xC3\x89",
 };
 // Pieces of regexes, each valid on its own.
-constexpr std::array<std::string_view, 18> kRegexAtoms = {
-    "a",    "b",   "k",   "s", "\xC3\xA9", ".",   " ",    "\\n",          "[ab]",
-    "[^a]", "\\w", "\\b", "^", "$",        "\\(", "\\\\", "[k\\x{212A}]", "A",
+constexpr std::array<std::string_view, 19> kRegexAtoms = {
+    "a", "b", "k",   "s",    "\xC3\xA9",     ".", " ",   "\\n", "[ab]", "[^a]", "\\w", "\\b",
+    "^", "$", "\\(", "\\\\", "[k\\x{212A}]", "A", "\\C",
 };
 
 class Generator {

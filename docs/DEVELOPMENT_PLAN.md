@@ -377,7 +377,9 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   broke `\Q`, finding every match could take quadratic time, `// /foo/` read
   as one regex, and many `/usr/bin` words parsed in quadratic time. All fixed
   with tests. Matches now stay within a line (RE2's `never_nl`), and on lines
-  over 1,024 bytes the work of highlighting is capped.
+  over 1,024 bytes the work of highlighting is capped. A later review found
+  that `never_nl` doesn't hold `\C` (any byte) to a line, so a regex with
+  `\C` is searched one line at a time.
 
 - `RegexMatcher` with RE2, and a brute-force RE2 reference with the same options.
 - v1: a regex becomes `All`, and RE2 checks every file the rest of the query

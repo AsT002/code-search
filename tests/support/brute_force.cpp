@@ -7,8 +7,6 @@
 
 #include <re2/re2.h>
 
-#include "codesearch/util/utf8.hpp"
-
 namespace codesearch::testing {
 
 namespace {
@@ -67,29 +65,15 @@ std::unique_ptr<RE2> compileRegex(const std::string& pattern, bool caseSensitive
     return std::make_unique<RE2>("(?m)" + pattern, options);
 }
 
-// Bytes in the character at text[i]: RE2 only starts matches at characters.
-// A byte that isn't part of valid UTF-8 counts as one.
-std::size_t characterLength(std::string_view text, std::size_t i) {
-    // The first byte says how long the character is: 0xxxxxxx is 1 byte,
-    // 110xxxxx is 2, 1110xxxx is 3, 11110xxx is 4.
-    const auto lead = static_cast<unsigned char>(text[i]);
-    std::size_t length = 1;
-    if (lead >= 0xF0) {
-        length = 4;
-    } else if (lead >= 0xE0) {
-        length = 3;
-    } else if (lead >= 0xC0) {
-        length = 2;
-    }
-    if (length == 1 || i + length > text.size()) {
-        return 1;
-    }
-    return isValidUtf8(text.substr(i, length)) ? length : 1;
+// Where the line text[i] is on ends: at its '\n', or the end of the text.
+std::size_t lineEndAt(std::string_view text, std::size_t i) {
+    return std::min(text.find('\n', i), text.size());
 }
 
-// Non-empty regex matches, left to right: at each character, try a match that
-// must start there; the first one found is the leftmost. A different way to
-// get there than RegexMatcher, which asks RE2 to search.
+// Non-empty regex matches, left to right: at each byte, try a match that
+// must start there and end within its line; the first one found is the
+// leftmost. A different way to get there than RegexMatcher, which asks RE2
+// to search. (Only \C can start a match inside a UTF-8 character.)
 std::vector<Span> regexMatches(std::string_view text, const std::string& pattern,
                                bool caseSensitive) {
     const std::unique_ptr<RE2> re = compileRegex(pattern, caseSensitive);
@@ -97,21 +81,26 @@ std::vector<Span> regexMatches(std::string_view text, const std::string& pattern
     std::size_t i = 0;
     while (i <= text.size()) {
         std::string_view found;
-        if (re->Match(text, i, text.size(), RE2::ANCHOR_START, &found, 1) && !found.empty()) {
+        if (re->Match(text, i, lineEndAt(text, i), RE2::ANCHOR_START, &found, 1) &&
+            !found.empty()) {
             spans.push_back(Span{i, i + found.size()});
             i += found.size();
             continue;
         }
-        if (i == text.size()) {
-            break;
-        }
-        i += characterLength(text, i);
+        ++i;
     }
     return spans;
 }
 
+// True if the regex matches within some line, empty matches too.
 bool regexFound(std::string_view text, const std::string& pattern, bool caseSensitive) {
-    return RE2::PartialMatch(text, *compileRegex(pattern, caseSensitive));
+    const std::unique_ptr<RE2> re = compileRegex(pattern, caseSensitive);
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        if (re->Match(text, i, lineEndAt(text, i), RE2::ANCHOR_START, nullptr, 0)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string_view languageOfTestPath(std::string_view path) {
