@@ -193,7 +193,7 @@ Status: done. Notes:
 - Update skips the build only when the commit, `format_version`,
   `policy_version` and `config_fingerprint` all match, and the index file
   opens with a header that matches the registry. It says why it rebuilt: "new
-  commit", "new index format", "new filter rules", "changed settings", "the
+  commit", "new index format", "new indexing rules", "changed settings", "the
   index file can't be used: ..." or "asked to rebuild".
 - Damage found on open gets rebuilt by a plain `update`. Damage found on read
   or by `verify` can't be seen by opening the file, so those errors name the

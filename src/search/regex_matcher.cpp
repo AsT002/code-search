@@ -46,11 +46,9 @@ std::string withLineAnchors(std::string_view pattern) {
 // How long findAll may look for matches in one text: kHighlightTime, plus
 // kHighlightTimePerByte for each byte of it. Finding even very dense
 // matches takes far less per byte; time that grows with the square of a
-// line's length takes far more. And how many searches findAll makes
-// between looks at the clock (see there).
+// line's length takes far more.
 constexpr std::chrono::milliseconds kHighlightTime{100};
 constexpr std::chrono::microseconds kHighlightTimePerByte{1};
-constexpr unsigned kSearchesPerClockCheck = 16;
 
 // findAll's time limit for a text of `bytes` bytes.
 class HighlightClock {
@@ -59,16 +57,13 @@ public:
         : deadline_(std::chrono::steady_clock::now() + kHighlightTime +
                     (kHighlightTimePerByte * bytes)) {}
 
-    // Called before each search. Reading the clock costs about as much as
-    // a short search, so it's read every kSearchesPerClockCheck calls.
-    bool timeIsUp() {
-        return ++searches_ % kSearchesPerClockCheck == 0 &&
-               std::chrono::steady_clock::now() > deadline_;
-    }
+    // Called before each search. The clock is read every time, though that
+    // costs about half as much as a short search: one search can take
+    // a second, so skipping even a few reads could run far past the limit.
+    bool timeIsUp() const { return std::chrono::steady_clock::now() > deadline_; }
 
 private:
     std::chrono::steady_clock::time_point deadline_;
-    unsigned searches_ = 0;
 };
 
 // True if the regex uses \C, which matches any one byte. never_nl doesn't
@@ -150,7 +145,7 @@ void RegexMatcher::findAll(std::string_view text, const std::function<bool(Span)
     // file still matches, but the rest of its matches aren't highlighted.
     // Ordinary files take a tiny part of that. A regex with \C could run
     // past its line, so each of its searches ends at the line's end.
-    HighlightClock clock(text.size());
+    const HighlightClock clock(text.size());
     std::size_t lineEnd = 0;  // where the line `from` is on ends, with \C
     bool lineKnown = false;
     std::size_t from = 0;

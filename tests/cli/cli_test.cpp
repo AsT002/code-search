@@ -150,6 +150,8 @@ TEST(Cli, BadArgumentsWithJsonGiveJson) {
              {"search", "--json", "-C", "abc", "foo"},
              {"search", "--json", "-x"},
              {"search", "a", "--json", "b"},
+             // The "--" is --path's value, not the end of the options.
+             {"search", "--path", "--", "--json", "-C", "abc", "foo"},
          }) {
         const ProcessResult result = codeSearch(args);
         EXPECT_EQ(result.exitCode, 2) << ::testing::PrintToString(args);

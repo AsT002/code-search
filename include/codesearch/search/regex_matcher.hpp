@@ -41,7 +41,8 @@ public:
     // overlaps, as RE2 finds them: each one starts as early as it can.
     // Return false from onMatch to stop. Stops by itself after a time
     // limit (100 ms plus 1 microsecond per byte), which only a pathological regex
-    // and text reach (see the .cpp).
+    // and text reach (see the .cpp). The limit is checked between searches,
+    // so one slow search can still run past it.
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 
     // The compiled regex, for the planner (see planCandidates).

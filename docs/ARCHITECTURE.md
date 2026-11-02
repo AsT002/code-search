@@ -201,7 +201,8 @@ Rules:
 
 Each index stores two values that describe the rules used to build it:
 
-- `policy_version` goes up when we change what the filter code does.
+- `policy_version` goes up when we change which files get indexed or how their
+  content is read. Version 2 ignores Git's replacement objects.
 - `config_fingerprint` is a hash of the actual settings (size limit, exclude
   patterns, overrides, codecs, normalization). If a user changes a setting, the
   fingerprint changes and the repo gets rebuilt.
@@ -285,14 +286,14 @@ would delete every index file and clone the registry doesn't list.
       "id": "r_1c2d4e5f", "name": "my-backend",
       "source": "local", "path": "/Users/me/projects/backend",
       "index": { "file": "r_1c2d4e5f-g0004.idx", "commit": "a1b2c3…",
-                 "format_version": 1, "policy_version": 1,
+                 "format_version": 1, "policy_version": 2,
                  "config_fingerprint": "9e41c0d2a7b35f16" }
     },
     {
       "id": "r_7f3a90b1", "name": "frontend",
       "source": "github", "url": "https://github.com/example/frontend",
       "index": { "file": "r_7f3a90b1-g0002.idx", "commit": "d4e5f6…",
-                 "format_version": 1, "policy_version": 1,
+                 "format_version": 1, "policy_version": 2,
                  "config_fingerprint": "9e41c0d2a7b35f16" }
     }
   ]
@@ -321,7 +322,7 @@ r_1c2d-g0004.idx
 │   format_version   1                                             │
 │   required_features / optional_features   (bit flags)            │
 │   hash_algo, hash_len, commit[32]          (SHA-1 uses 20 bytes) │
-│   policy_version   1                                             │
+│   policy_version   2                                             │
 │   config_fingerprint[32]                                         │
 │   doc_count, trigram_count                                       │
 │   section table: offset, length and codec for each section       │
@@ -712,8 +713,10 @@ take time growing with the square of the line's length: for `/a*z|a/` on a
 line of `a`s, each search looks to the line's end for a `z`. RE2 can't say
 how much work a search did, so `findAll` stops after a time limit: 100 ms
 plus 1 microsecond per byte of the file. The file still matches; the rest of
-its matches aren't highlighted. A release build finds even a match on every
-byte in 0.04 microseconds per byte, so only pathological cases reach it. (An
+its matches aren't highlighted. The clock is read before every search, since
+one search can take a second; it runs past the limit by one search at most.
+A release build finds even a match on every byte in 0.04 microseconds per
+byte, so only pathological cases reach it. (An
 earlier limit counted work per line, which cut ordinary long lines, like
 minified code, to about 300 highlights.) With `-l` the matches aren't looked
 for at all.

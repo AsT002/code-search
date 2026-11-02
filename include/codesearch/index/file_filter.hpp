@@ -8,9 +8,10 @@
 
 namespace codesearch {
 
-// Goes up by one whenever we change what the filter code does, so old indexes
-// get rebuilt with the new rules.
-inline constexpr std::uint32_t kPolicyVersion = 1;
+// Goes up by one whenever we change which files get indexed or how their
+// content is read, so old indexes get rebuilt with the new rules.
+// 2: Git's replacement objects are ignored (GIT_NO_REPLACE_OBJECTS).
+inline constexpr std::uint32_t kPolicyVersion = 2;
 
 // Settings the user can change.
 struct FilterConfig {

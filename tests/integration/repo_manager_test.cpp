@@ -661,7 +661,13 @@ TEST(RepoManager, OlderFormatOrRulesCauseARebuild) {
     registry = store.load();
     registry.repos[0].index.policyVersion = kPolicyVersion - 1;
     store.save(registry);
-    EXPECT_EQ(manager.update("backend", false).reason, "new filter rules");
+    EXPECT_EQ(manager.update("backend", false).reason, "new indexing rules");
+
+    // Version 1 indexes may hold the content of Git's replacement objects.
+    registry = store.load();
+    registry.repos[0].index.policyVersion = 1;
+    store.save(registry);
+    EXPECT_EQ(manager.update("backend", false).reason, "new indexing rules");
 
     registry = store.load();
     registry.repos[0].index.configFingerprint += 1;

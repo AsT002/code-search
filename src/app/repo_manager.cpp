@@ -155,7 +155,7 @@ std::string whyRebuild(const Workspace& workspace, const IndexInfo& current,
         return "new index format";
     }
     if (current.policyVersion != wanted.policyVersion) {
-        return "new filter rules";
+        return "new indexing rules";
     }
     if (current.configFingerprint != wanted.configFingerprint) {
         return "changed settings";

@@ -294,6 +294,30 @@ TEST(RegexMatcher, FindingAllMatchesStaysFast) {
     }
 }
 
+// Each search for /a.*a.{1000}c|a/ in random a's and b's reads the rest of
+// the line, slowly. findAll checks its limit (101.5 ms for 1,500 bytes)
+// before each search, so it runs past the limit by one search at most,
+// not by many.
+TEST(RegexMatcher, SlowSearchesStopAtTheTimeLimit) {
+    std::mt19937 random(1);  // NOLINT(cert-msc32-c,cert-msc51-cpp,bugprone-random-generator-seed)
+    std::string text;
+    for (int i = 0; i < 1500; ++i) {
+        text += (random() % 2 == 0) ? 'a' : 'b';
+    }
+    const auto start = std::chrono::steady_clock::now();
+    double firstSearch = 0;  // seconds until the first match was found
+    RegexMatcher("a.*a.{1000}c|a", true).findAll(text, [&](Span) {
+        if (firstSearch == 0) {
+            firstSearch =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        }
+        return true;
+    });
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    EXPECT_LT(seconds, 0.1015 + (2 * firstSearch));
+}
+
 // Ordinary regexes highlight every match, however long the line, like
 // plain text does. (findAll's time limit allows 1 microsecond per byte; a
 // release build takes a twentieth of that even with a match on every

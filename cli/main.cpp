@@ -175,15 +175,24 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
     return result;
 }
 
-// True if --json is among the search arguments, before any "--".
+// True for the search options readOption reads, which take a value.
+bool takesValue(std::string_view arg) {
+    return arg == "--repo" || arg == "--path" || arg == "--max-results" || arg == "-C";
+}
+
+// True if --json is among the search arguments, before any "--". Skips
+// option values, so the "--" in "--path -- --json" is a path.
 bool asksForJson(std::span<char*> args) {
-    for (const char* arg : args) {
-        const std::string_view text = arg;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string_view text = args[i];
         if (text == "--") {
             return false;
         }
         if (text == "--json") {
             return true;
+        }
+        if (takesValue(text)) {
+            ++i;  // its value
         }
     }
     return false;
