@@ -8,12 +8,40 @@
 
 namespace codesearch {
 
+namespace {
+
+// Patterns longer than this are found with findLong. find() can compare a
+// whole pattern at almost every position of repetitive text (a run of a's
+// for "aaa...ab"), which costs text size times pattern size. For short
+// patterns that's a small multiple of the text; for long ones it isn't.
+constexpr std::size_t kLongPattern = 64;
+
+}  // namespace
+
 LiteralMatcher::LiteralMatcher(std::string_view pattern, bool caseSensitive)
     : pattern_(pattern), caseSensitive_(caseSensitive) {
     if (!caseSensitive_) {
         for (char& c : pattern_) {
             c = foldAscii(c);
         }
+    }
+    if (pattern_.size() <= kLongPattern) {
+        return;
+    }
+    // The Knuth-Morris-Pratt table: when a match breaks off after
+    // `matched` bytes, its last borders_[matched - 1] bytes are still a
+    // start of the pattern, so the search goes on from there without
+    // looking back at the text.
+    borders_.assign(pattern_.size(), 0);
+    std::size_t border = 0;
+    for (std::size_t i = 1; i < pattern_.size(); ++i) {
+        while (border > 0 && pattern_[i] != pattern_[border]) {
+            border = borders_[border - 1];
+        }
+        if (pattern_[i] == pattern_[border]) {
+            ++border;
+        }
+        borders_[i] = border;
     }
 }
 
@@ -103,6 +131,9 @@ std::size_t LiteralMatcher::find(std::string_view text, std::size_t from) const 
     if (pattern_.empty()) {
         return std::string_view::npos;  // matches nothing, as for findAll
     }
+    if (!borders_.empty()) {
+        return findLong(text, from);
+    }
     // memchr, which string_view::find uses, jumps quickly from one copy of
     // the first byte to the next. That wins when the byte is rare, so only
     // patterns starting with a common byte go to the filter below. (Measured
@@ -141,6 +172,27 @@ std::size_t LiteralMatcher::find(std::string_view text, std::size_t from) const 
     for (; i <= lastStart; ++i) {
         if (first(text[i]) && last(text[i + lastOffset]) && matchesAt(i)) {
             return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+// Knuth-Morris-Pratt: reads each byte of the text once, and after a
+// mismatch drops back through borders_ instead of starting over at the
+// next position. Each drop undoes at least one earlier step, so the whole
+// search takes time linear in the text.
+std::size_t LiteralMatcher::findLong(std::string_view text, std::size_t from) const {
+    std::size_t matched = 0;  // bytes of the pattern matched so far
+    for (std::size_t i = from; i < text.size(); ++i) {
+        const char c = caseSensitive_ ? text[i] : foldAscii(text[i]);
+        while (matched > 0 && c != pattern_[matched]) {
+            matched = borders_[matched - 1];
+        }
+        if (c == pattern_[matched]) {
+            ++matched;
+        }
+        if (matched == pattern_.size()) {
+            return i + 1 - pattern_.size();
         }
     }
     return std::string_view::npos;

@@ -289,6 +289,52 @@ TEST(RepoManager, AddsOnlyTheTopFolderOfARepo) {
     EXPECT_EQ(manager.add(backend.dir().string(), "backend").repo.name, "backend");
 }
 
+// A repo inside another one loses its .git. Git would now find the outer
+// repo from its folder; update must not index that one in its place.
+TEST(RepoManager, UpdateChecksTheFolderIsStillARepo) {
+    const TempDir home;
+    const Workspace workspace(home.file("ws"));
+    TempRepo outer;
+    outer.write("outer.txt", "outer text\n");
+    outer.commit();
+    const std::filesystem::path inner = outer.dir() / "inner";
+    std::filesystem::create_directories(inner);
+    writeFile(inner / "a.txt", "inner text\n");
+    for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
+             {"init", "-q"},
+             {"add", "a.txt"},
+             {
+                 "-c",
+                 "user.name=t",
+                 "-c",
+                 "user.email=t@t",
+                 "-c",
+                 "commit.gpgsign=false",
+                 "commit",
+                 "-q",
+                 "-m",
+                 "x",
+             },
+         }) {
+        std::vector<std::string> full = {"-C", inner.string()};
+        full.insert(full.end(), args.begin(), args.end());
+        ASSERT_EQ(runProcess("git", full).exitCode, 0);
+    }
+    RepoManager manager(workspace, noGitHub());
+    manager.add(inner.string(), "inner");
+    const std::string before = readFile(workspace.registryFile());
+
+    std::filesystem::remove_all(inner / ".git");
+    expectError(
+        [&] {
+            manager.update("inner", true);
+        },
+        "is no longer the top folder of a Git repo");
+    EXPECT_EQ(readFile(workspace.registryFile()), before);
+    EXPECT_EQ(searchAll(workspace, "inner text"), std::vector<std::string>{"inner:a.txt"});
+    EXPECT_TRUE(searchAll(workspace, "outer text").empty());
+}
+
 TEST(RepoManager, FailedCloneLeavesNothing) {
     const TempDir home;
     const Workspace workspace(home.file("ws"));

@@ -15,8 +15,10 @@ class RE2;
 
 namespace codesearch {
 
-// Finds an RE2 regular expression in text. RE2 runs in time linear in the
-// text, so no pattern can make a search hang. The text is read as UTF-8.
+// Finds an RE2 regular expression in text. RE2 never backtracks, so a
+// search takes at most time linear in the text times the pattern's size.
+// Most patterns run in time linear in the text alone; a few, like
+// /a.{1000}c/, can take seconds on a long file. The text is read as UTF-8.
 // ^ and $ match at the start and end of every line, not only of the text.
 // Without case sensitivity, RE2 folds case its own way, for non-ASCII
 // letters too (unlike LiteralMatcher, which folds only ASCII).
@@ -37,7 +39,9 @@ public:
 
     // Calls onMatch for each non-empty match, left to right, without
     // overlaps, as RE2 finds them: each one starts as early as it can.
-    // Return false from onMatch to stop.
+    // Return false from onMatch to stop. Stops by itself after a time
+    // limit (100 ms plus 1 microsecond per byte), which only a pathological regex
+    // and text reach (see the .cpp).
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 
     // The compiled regex, for the planner (see planCandidates).

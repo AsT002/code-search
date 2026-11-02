@@ -66,8 +66,9 @@ public:
     // code (128 + the signal number if a signal killed it). Output not read
     // yet is lost.
     int wait();
-    // Everything the program wrote to its error output. Only complete after wait().
-    const std::string& errorOutput() const { return stderr_; }
+    // Everything the program wrote to its error output. Only complete after
+    // wait(). Throws std::bad_alloc if memory ran out while keeping it.
+    const std::string& errorOutput() const;
 
 private:
     // Reads more output into buffer_. Returns false at the end of the output.
@@ -82,6 +83,7 @@ private:
 
     std::thread stderrReader_;
     std::string stderr_;
+    bool stderrLost_ = false;  // set by stderrReader_ if keeping it ran out of memory
 
     std::string buffer_;         // output read but not handed out yet...
     std::size_t bufferPos_ = 0;  // ...starts here

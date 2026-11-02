@@ -268,6 +268,14 @@ UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
             repoDir = workspace_.cloneDir(entry.id);
             fetchLatest(repoDir);
             step("fetched");
+        } else if (repoTopFolder(repoDir) != repoDir) {
+            // Git finds a repo from any folder inside it. If this folder
+            // stopped being one (its .git deleted), Git would find a repo
+            // around it, whose files would replace this repo's index.
+            throw std::runtime_error(entry.location +
+                                     " is no longer the top folder of a Git repo. Remove it "
+                                     "with: code-search remove " +
+                                     entry.name);
         }
 
         const GitRepo repo(repoDir);

@@ -1,10 +1,14 @@
 #include "codesearch/util/process.hpp"
 
+#include "../support/allocations.hpp"
+
 #include <gtest/gtest.h>
 
 #include <csignal>
 #include <cstdlib>
+#include <new>
 #include <string>
+#include <thread>
 
 namespace codesearch {
 namespace {
@@ -18,6 +22,19 @@ TEST(Process, ReturnsOutputErrorsAndExitCode) {
     EXPECT_EQ(result.exitCode, 3);
     EXPECT_EQ(result.out, "out\n");
     EXPECT_EQ(result.err, "err\n");
+}
+
+// The error output is read on its own thread. If memory runs out there,
+// the caller gets std::bad_alloc, instead of the program being ended.
+TEST(Process, RunningOutOfMemoryForErrorOutputIsReported) {
+    gMainThread = std::this_thread::get_id();
+    // Only allocations on other threads fail: here, the reader's. 200
+    // bytes, too many to fit in a string without allocating.
+    const std::string command = "printf '%0200d' 0 >&2";
+    gFailIn = 1;
+    EXPECT_THROW(runShell(command), std::bad_alloc);
+    gFailIn = 0;
+    EXPECT_EQ(runShell(command).err, std::string(200, '0'));
 }
 
 TEST(Process, ReportsDeathBySignal) {

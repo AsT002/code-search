@@ -76,7 +76,7 @@ std::vector<Match> locate(std::string_view content, std::span<const Span> spans)
 SearchStatus forEachMatch(
     const IndexReader& index, const QueryNode& query, const SearchOptions& options,
     const std::function<bool(const FileMatch& file, std::string_view content)>& onFile,
-    const std::atomic<bool>* cancelled) {
+    const std::atomic<bool>* cancelled, bool withMatches) {
     // 1. Use the index to find files that might match.
     const std::vector<DocId> candidates = findCandidates(index, planCandidates(query, options));
 
@@ -96,7 +96,9 @@ SearchStatus forEachMatch(
             FileMatch file;
             file.doc = doc;
             file.path = std::string(path);
-            file.matches = locate(content, evaluator.collectSpans(doc, path, content));
+            if (withMatches) {
+                file.matches = locate(content, evaluator.collectSpans(doc, path, content));
+            }
             keepGoing = onFile(file, content);
         });
         if (!keepGoing) {

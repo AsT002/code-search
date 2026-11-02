@@ -50,11 +50,13 @@ std::vector<Match> locate(std::string_view content, std::span<const Span> spans)
 // file's content. The content is only valid during the call. onFile returns
 // false to stop, which makes this return Truncated. If `cancelled` is set,
 // it's checked before each file, and once it's true this returns Cancelled.
-// The query's repo: filters must already be resolved (resolveRepo).
+// With `withMatches` false, file.matches stays empty, which saves finding
+// them when only the file names are wanted. The query's repo: filters must
+// already be resolved (resolveRepo).
 SearchStatus forEachMatch(
     const IndexReader& index, const QueryNode& query, const SearchOptions& options,
     const std::function<bool(const FileMatch& file, std::string_view content)>& onFile,
-    const std::atomic<bool>* cancelled = nullptr);
+    const std::atomic<bool>* cancelled = nullptr, bool withMatches = true);
 
 // Every file matching `query`. For tests and small searches.
 SearchResults search(const IndexReader& index, const QueryNode& query,

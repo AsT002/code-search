@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,9 +45,9 @@ constexpr std::array<std::string_view, 7> kFoldingPieces = {
     "k", "K", "\xE2\x84\xAA", "s", "\xC5\xBF", "\xC3\xA9", "\xC3\x89",
 };
 // Pieces of regexes, each valid on its own.
-constexpr std::array<std::string_view, 19> kRegexAtoms = {
+constexpr std::array<std::string_view, 20> kRegexAtoms = {
     "a", "b", "k",   "s",    "\xC3\xA9",     ".", " ",   "\\n", "[ab]", "[^a]", "\\w", "\\b",
-    "^", "$", "\\(", "\\\\", "[k\\x{212A}]", "A", "\\C",
+    "^", "$", "\\(", "\\\\", "[k\\x{212A}]", "A", "\\C", "/",
 };
 
 class Generator {
@@ -177,6 +178,26 @@ std::string quoted(const std::string& text) {
 }
 
 // The tree as query text, with every group in parentheses.
+// A regex as typed in a query. The parser keeps a backslash and the byte
+// after it as they are, except \/, which it reads as /. So a '/' on its own
+// is typed \/, and a pattern holding \/ can't be typed at all (it's the
+// same regex as /, which can).
+std::string typedRegex(const std::string& text) {
+    std::string out = "/";
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\\' && i + 1 < text.size()) {
+            if (text[i + 1] == '/') {
+                throw std::logic_error("a regex holding \\/ can't be typed: " + text);
+            }
+            out += text.substr(i, 2);
+            ++i;
+        } else {
+            out += text[i] == '/' ? "\\/" : std::string(1, text[i]);
+        }
+    }
+    return out + "/";
+}
+
 std::string toText(const QueryNode& query) {
     if (const auto* lit = std::get_if<LiteralNode>(&query.value)) {
         return quoted(lit->text);
@@ -185,11 +206,7 @@ std::string toText(const QueryNode& query) {
         return "path:" + quoted(path->text);
     }
     if (const auto* pattern = std::get_if<RegexNode>(&query.value)) {
-        std::string out = "/";
-        for (const char c : pattern->pattern) {
-            out += c == '/' ? "\\/" : std::string(1, c);
-        }
-        return out + "/";
+        return typedRegex(pattern->pattern);
     }
     if (const auto* lang = std::get_if<LangNode>(&query.value)) {
         return "lang:" + lang->name;

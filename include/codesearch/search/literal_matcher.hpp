@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace codesearch {
 
@@ -34,9 +35,14 @@ public:
 private:
     // Position of the first match at or after `from`, or npos if none.
     std::size_t find(std::string_view text, std::size_t from) const;
+    // The same, for long patterns (see the constructor).
+    std::size_t findLong(std::string_view text, std::size_t from) const;
 
     std::string pattern_;  // already lowercased when !caseSensitive_
     bool caseSensitive_;
+    // For long patterns: borders_[i] is the length of the longest proper
+    // prefix of pattern_[0, i] that is also its suffix. Empty otherwise.
+    std::vector<std::size_t> borders_;
 };
 
 }  // namespace codesearch

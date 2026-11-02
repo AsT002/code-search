@@ -45,6 +45,11 @@ constexpr std::array<std::string_view, 15> kRepoEnvVars = {
 std::vector<std::string> gitEnv(const std::vector<std::string>& extraEnv) {
     // Plain names, so the Process leaves them out.
     std::vector<std::string> env(kRepoEnvVars.begin(), kRepoEnvVars.end());
+    // Git reads "replacement" objects (`git replace`) in place of the real
+    // ones. An index is saved under its commit's id, and replacements can
+    // change without that id changing, so an index would go stale with no
+    // way to tell. Read the objects the id names, always.
+    env.emplace_back("GIT_NO_REPLACE_OBJECTS=1");
     env.insert(env.end(), extraEnv.begin(), extraEnv.end());
     return env;
 }

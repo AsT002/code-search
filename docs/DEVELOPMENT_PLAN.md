@@ -380,6 +380,15 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   over 1,024 bytes the work of highlighting is capped. A later review found
   that `never_nl` doesn't hold `\C` (any byte) to a line, so a regex with
   `\C` is searched one line at a time.
+- A third review found that the per-line cap cut ordinary long lines to
+  about 300 highlights, so a time limit (100 ms plus 1 microsecond per byte)
+  replaced it. It also found that `k` and `s` made a whole atom `All` (now
+  only the text between them is required), that `-l` still found every
+  match, and that RE2's default 8 MiB made some patterns take seconds (now
+  64 MiB). Other fixes from the same round: long literals in repetitive text
+  (now Knuth-Morris-Pratt), Git replacement objects, a nested repo losing its
+  `.git`, out of memory on the thread reading Git's errors, Ctrl-C while
+  `--path` indexes, unescaped `verify` messages, and `--json` usage errors.
 
 - `RegexMatcher` with RE2, and a brute-force RE2 reference with the same options.
 - v1: a regex becomes `All`, and RE2 checks every file the rest of the query

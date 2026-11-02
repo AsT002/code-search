@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "../support/failing_pool.hpp"
 #include "../support/temp_repo.hpp"
 #include "codesearch/search/searcher.hpp"
+#include "codesearch/util/process.hpp"
 
 namespace codesearch {
 namespace {
@@ -128,6 +130,25 @@ TEST(IndexCommit, UsesTheCommitGivenEvenIfHeadMoves) {
     EXPECT_EQ(indexedPaths(built.index), std::vector<std::string>{"a.txt"});
     EXPECT_EQ(matchingPaths(built.index, "old text", false), std::vector<std::string>{"a.txt"});
     EXPECT_TRUE(matchingPaths(built.index, "new text", false).empty());
+}
+
+// `git replace` makes Git show one object in place of another. The index
+// is saved under the commit's id, so it must hold what that id names:
+// replacements can come and go without the id changing.
+TEST(IndexCommit, IgnoresReplacementObjects) {
+    TempRepo repo;
+    repo.write("a.txt", "real text\n");
+    const ObjectId commit = repo.commit();
+    repo.write("b.txt", "fake text\n");  // staged only, to make the object
+    const std::string real = repo.git({"rev-parse", "HEAD:a.txt"}).out.substr(0, 40);
+    const std::string fake = repo.git({"rev-parse", ":b.txt"}).out.substr(0, 40);
+    repo.git({"replace", real, fake});
+    ASSERT_EQ(runProcess("git", {"-C", repo.dir().string(), "show", "HEAD:a.txt"}).out,
+              "fake text\n");  // plain Git now shows the replacement
+
+    const CommitIndex built = indexCommit(GitRepo(repo.dir()), commit, FileFilter());
+    EXPECT_EQ(matchingPaths(built.index, "real text", false), std::vector<std::string>{"a.txt"});
+    EXPECT_TRUE(matchingPaths(built.index, "fake text", false).empty());
 }
 
 TEST(IndexCommit, IgnoresUncommittedChanges) {
@@ -270,6 +291,20 @@ TEST(IndexCommit, FailedSubmitIsAnErrorNotAHang) {
     testing::failIfItHangs([&] {
         EXPECT_THROW(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), &pool), std::bad_alloc);
     });
+}
+
+// Ctrl-C sets the flag; indexing stops before the next file.
+TEST(IndexCommit, StopsWhenCancelled) {
+    TempRepo repo;
+    repo.write("a.txt", "alpha");
+    const ObjectId commit = repo.commit();
+    std::atomic<bool> cancelled = true;
+    EXPECT_THROW(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), nullptr, &cancelled),
+                 IndexingCancelled);
+    cancelled = false;
+    EXPECT_EQ(indexCommit(GitRepo(repo.dir()), commit, FileFilter(), nullptr, &cancelled)
+                  .report.indexed.files,
+              1U);
 }
 
 }  // namespace

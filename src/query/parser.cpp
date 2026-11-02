@@ -39,6 +39,8 @@ struct Token {
     bool plain = true;
     // For Regex: the pattern is for the path (path:/x/ or file:/x/).
     bool forPath = false;
+    // For Regex: the token as typed, like path:/a\/b/, for error messages.
+    std::string typed;
 };
 
 bool isSpace(char c) {
@@ -178,12 +180,14 @@ std::optional<Token> regexToken(std::string_view input, std::size_t& pos,
     if (!pattern.has_value()) {
         return std::nullopt;
     }
-    pos = start;
-    return Token{
+    Token token{
         .kind = TokenKind::Regex,
         .text = std::move(pattern.value()),
         .forPath = forPath,
+        .typed = std::string(input.substr(pos, start - pos)),
     };
+    pos = start;
+    return token;
 }
 
 std::vector<Token> tokenize(std::string_view input) {
@@ -386,7 +390,7 @@ private:
         options.set_log_errors(false);
         const RE2 check(token.text, options);
         if (!check.ok()) {
-            throw QueryError("the regex /" + token.text + "/ isn't valid: " + check.error());
+            throw QueryError("the regex " + token.typed + " isn't valid: " + check.error());
         }
         return token.forPath ? pathRegex(token.text) : regex(token.text);
     }

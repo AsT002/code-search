@@ -107,7 +107,9 @@ TEST(Parser, Regexes) {
 TEST(Parser, BadRegexesAreErrors) {
     expectError("/(ab/", "the regex /(ab/ isn't valid: missing )");
     expectError("/a)(b/", "isn't valid");  // valid only if wrapped in a group
-    expectError("path:/[z-a]/", "isn't valid");
+    // The message shows the regex as typed, so it can be found and fixed.
+    expectError("path:/[z-a]/", "the regex path:/[z-a]/ isn't valid");
+    expectError(R"(x /a\/(/ y)", R"(the regex /a\/(/ isn't valid)");
 }
 
 TEST(Parser, CaseIsAnOption) {

@@ -268,6 +268,12 @@ would delete every index file and clone the registry doesn't list.
 - Every Git we start runs without the variables `git rev-parse --local-env-vars`
   lists, like `GIT_DIR` and `GIT_WORK_TREE`. Git sets them for hooks and
   aliases, and they would override `-C` and `--git-dir`.
+- Every Git we start also gets `GIT_NO_REPLACE_OBJECTS=1`. Otherwise Git
+  shows `git replace` objects in place of the real ones, and those can change
+  while the commit id the index is saved under stays the same.
+- `update` checks that a local repo's folder is still the top folder of a
+  repo. If its `.git` was deleted, Git would find a repo around it, and index
+  that one in its place.
 
 `registry.json`:
 
@@ -489,7 +495,7 @@ is a breaking change.
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
 | `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` and `\C+` stop at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
 | What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message |
-| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. On a line longer than 1,024 bytes with very many matches, highlighting can stop partway along it (see Regex below) |
+| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. For a pathological regex and file, highlighting can stop partway through the file after a time limit (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
 | Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
@@ -682,8 +688,14 @@ code-search search "authenticate"
 
 ### Regex
 
-We use RE2, never `std::regex`. RE2 runs in linear time, so a bad pattern can't
-hang a search. `RegexMatcher` compiles each pattern once, as `(?m)pattern` so
+We use RE2, never `std::regex`. RE2 never backtracks, so a search takes at
+most time linear in the text times the pattern's size, and for most patterns
+linear in the text alone. RE2's fast matcher, a DFA, gets up to 64 MiB per
+regex (the default is 8 MiB): on 1 MiB, `/(a|b).{1000}(a|b){1000}c/` takes
+0.06 s instead of 17 s. A few patterns, like `/a.{1000}c/`, need more DFA
+states than any limit allows, and RE2's fallback takes seconds on a long
+file. Ctrl-C is checked between files, so it waits for that file.
+`RegexMatcher` compiles each pattern once, as `(?m)pattern` so
 `^` and `$` work per line, with RE2's `never_nl` so no match takes in a line
 ending. There's no group around the pattern: a `\Q` without `\E` would
 quote its `)`.
@@ -697,10 +709,14 @@ by one byte instead of one character.
 
 Each search for a match is linear, but finding every match on a line can
 take time growing with the square of the line's length: for `/a*z|a/` on a
-line of `a`s, each search looks to the line's end for a `z`. Lines of up to
-1,024 bytes are searched in full. On a longer line, each search is charged
-the rest of the line, an upper bound on its work, and once that reaches 256
-per byte of the line, the rest of it isn't highlighted.
+line of `a`s, each search looks to the line's end for a `z`. RE2 can't say
+how much work a search did, so `findAll` stops after a time limit: 100 ms
+plus 1 microsecond per byte of the file. The file still matches; the rest of
+its matches aren't highlighted. A release build finds even a match on every
+byte in 0.04 microseconds per byte, so only pathological cases reach it. (An
+earlier limit counted work per line, which cut ordinary long lines, like
+minified code, to about 300 highlights.) With `-l` the matches aren't looked
+for at all.
 
 1. v1 (done): a regex is `All`, and RE2 checks every file the rest of the query
    allows. The correct baseline.
@@ -716,10 +732,11 @@ Where those differ, the index could miss a match, so:
 - A pattern that can name a non-ASCII character (with its bytes, `\x{...}`,
   an octal escape like `\577`, `\p` or `\P`) is `All`. Some lowercase into ASCII: U+212A KELVIN SIGN
   becomes `k`.
-- Without `case:yes`, or with a `(?i)` flag in the pattern, an atom with a
-  `k` or an `s` is `All`: RE2 then also matches KELVIN SIGN for `k` and LONG S
-  for `s`. Those are the only ASCII letters it folds with anything outside
-  ASCII (checked against every code point).
+- Without `case:yes`, or with a `(?i)` flag in the pattern, RE2 also matches
+  KELVIN SIGN for `k` and LONG S for `s`. Those are the only ASCII letters it
+  folds with anything outside ASCII (checked against every code point). So
+  an atom is split at each `k` and `s`, and only the pieces between are
+  required: `mustcompile(` needs `mu` and `tcompile(`.
 - An atom with non-ASCII bytes is `All`. After the first rule, these only
   come from case variants like LONG S for `s`, which the index keeps as they
   are; it's a second guard.

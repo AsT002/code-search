@@ -299,13 +299,27 @@ TrigramQuery fromPrefilter(re2::Prefilter& node, bool caseSensitive) {
             const bool ascii = std::all_of(atom.begin(), atom.end(), [](char c) {
                 return static_cast<unsigned char>(c) < 0x80;
             });
-            // RE2 folds k with KELVIN SIGN and s with LONG S, the only ASCII
-            // letters it folds with something outside ASCII.
-            const bool foldsOutsideAscii = atom.find_first_of("ks") != std::string::npos;
-            if (!ascii || (!caseSensitive && foldsOutsideAscii)) {
+            if (!ascii) {
                 return {AllQuery{}};
             }
-            return planLiteral(LiteralNode{atom});
+            if (caseSensitive) {
+                return planLiteral(LiteralNode{atom});
+            }
+            // RE2 folds k with KELVIN SIGN and s with LONG S, the only ASCII
+            // letters it folds with something outside ASCII. A match may
+            // have those in their place, so only the text between them is
+            // sure to be there: "mustcompile" needs "mu" and "tcompile".
+            std::vector<TrigramQuery> pieces;
+            std::size_t start = 0;
+            while (true) {
+                const std::size_t stop = atom.find_first_of("ks", start);
+                pieces.push_back(planLiteral(LiteralNode{atom.substr(start, stop - start)}));
+                if (stop == std::string::npos) {
+                    break;
+                }
+                start = stop + 1;
+            }
+            return combineAnd(std::move(pieces));
         }
         case re2::Prefilter::AND:
         case re2::Prefilter::OR: {

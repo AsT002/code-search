@@ -19,7 +19,7 @@ Files and bytes of content RE2 has to check, out of 18,829 files and
 | `/^import \(/` | 18,829 | 6,425 | 130.2 | 75.3 | 203.6 | 123.3 | 42.7 | 26.7 |
 | `/\berr != nil \{$/` | 18,829 | 2,871 | 130.2 | 37.7 | 222.8 | 82.1 | 44.8 | 15.3 |
 | `/[A-Z][a-z]+Error\b/` | 18,829 | 7,345 | 130.2 | 82.2 | 224.9 | 152.4 | 45.7 | 29.4 |
-| `/MustCompile\("/` | 18,829 | 124 | 130.2 | 4.7 | 37.1 | 1.64 | 9.51 | 0.56 |
+| `/MustCompile\("/` | 18,829 | 172 | 130.2 | 7.0 | 37.1 | 2.61 | 9.51 | 0.71 |
 | `/\d{4}-\d{2}-\d{2}/` | 18,829 | 18,829 | 130.2 | 130.2 | 205.2 | 207.5 | 41.9 | 41.0 |
 | `/^\s*#include <vector>/` | 18,829 | 36 | 130.2 | 2.2 | 201.2 | 3.82 | 40.9 | 1.70 |
 
@@ -31,6 +31,11 @@ and where there is some, v2 already finds it.
 
 `func \w+\(...` and `MustCompile\("` are fast even in v1: RE2 skips ahead
 quickly to a literal prefix like `func ` in a file.
+
+The `MustCompile` row was measured again after a later fix (v2 was 124
+files, 4.7 MiB). Without `case:yes`, RE2 matches KELVIN SIGN for `k` and
+LONG S for `s`, so only the text between those letters is required:
+`tcompile("`, not `mustcompile("`.
 
 ### Fresh-process regex searches
 
@@ -156,6 +161,11 @@ Warm, all results, ms. Stages 0 to 2 on one thread, the rest on 8.
    Lowercase letters and spaces are the most common bytes in code, so
    case-sensitive patterns starting with one of those use the filter, and
    the rest use memchr. That picks the faster one for all five.
+
+   Both can compare a whole pattern at almost every position of repetitive
+   text, which costs text size times pattern size: a 64 KiB pattern in
+   1 MiB took about 19 s. Patterns over 64 bytes, rare in practice, now use
+   Knuth-Morris-Pratt, which never looks back at the text (0.06 s there).
 
 2. **Result lines.** `resultLines` found every line start of a matching file
    to show a few lines. It now jumps to each matching line (a match's column

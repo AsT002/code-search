@@ -253,6 +253,34 @@ TEST(SearchRepos, FilesCountAsOneWithoutHighlights) {
     EXPECT_EQ(status, SearchStatus::Truncated);
 }
 
+// With filesOnly, only names are shown, so the matches aren't found at
+// all: here that would be a million of them, tens of MiB.
+TEST(SearchRepos, FilesOnlyDoesntFindTheMatches) {
+    IndexBuilder builder;
+    builder.add("a.txt", std::string(std::size_t{1} << 20U, 'a'));
+    const MemoryIndex index = builder.build();
+    const std::vector<SearchTarget> targets = {{.name = "r", .index = &index}};
+    ThreadPool pool(2);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "thread pool");
+        SearchRequest request;
+        request.query = literal("a");
+        request.filesOnly = true;
+        request.pool = threads;
+        std::size_t files = 0;
+        gAllocated = 0;
+        gCounting = true;
+        const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
+            files += 1;
+            EXPECT_TRUE(file.lines.empty());
+        });
+        gCounting = false;
+        EXPECT_EQ(status, SearchStatus::Complete);
+        EXPECT_EQ(files, 1U);
+        EXPECT_LT(gAllocated.load(), std::size_t{1} << 20U) << "bytes allocated";
+    }
+}
+
 TEST(SearchRepos, LimitCarriesAcrossRepos) {
     const MemoryIndex index = manyFiles(1);
     const std::vector<SearchTarget> targets = {

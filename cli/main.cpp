@@ -175,6 +175,20 @@ std::optional<SearchArgs> parseSearchArgs(std::span<char*> args) {
     return result;
 }
 
+// True if --json is among the search arguments, before any "--".
+bool asksForJson(std::span<char*> args) {
+    for (const char* arg : args) {
+        const std::string_view text = arg;
+        if (text == "--") {
+            return false;
+        }
+        if (text == "--json") {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct AddArgs {
     std::string source;
     std::string name;
@@ -216,10 +230,11 @@ struct BuiltRepo {
     CommitIndex built;
 };
 
-// Indexes the repo's HEAD in memory and prints what was indexed. Returns
-// nothing, after saying why, if the repo has no commits.
-// `pool` can be nullptr, to build on this thread.
-BuiltRepo buildRepo(const std::string& path, const FileFilter& filter, ThreadPool* pool) {
+// Indexes the repo's HEAD in memory and prints what was indexed. Throws if
+// the repo has no commits. `pool` can be nullptr, to build on this thread.
+// Throws IndexingCancelled once `cancelled` is set.
+BuiltRepo buildRepo(const std::string& path, const FileFilter& filter, ThreadPool* pool,
+                    const std::atomic<bool>* cancelled) {
     const GitRepo repo(path);
     const std::optional<ObjectId> commit = repo.resolveHead();
     if (!commit.has_value()) {
@@ -227,7 +242,7 @@ BuiltRepo buildRepo(const std::string& path, const FileFilter& filter, ThreadPoo
     }
     BuiltRepo result{
         .commit = commit.value(),
-        .built = indexCommit(repo, commit.value(), filter, pool),
+        .built = indexCommit(repo, commit.value(), filter, pool, cancelled),
     };
     printReport(result.commit, result.built.report);
     return result;
@@ -395,9 +410,6 @@ extern "C" void onInterrupt(int /*signal*/) {
     static_cast<void>(std::signal(SIGINT, SIG_DFL));
 }
 
-// Runs the search and prints the results, as text or JSON. Sets `found` if
-// there was any. If the search fails partway, JSON output is still ended as
-// one whole document, saying why.
 // While one of these lives, Ctrl-C sets gCancelled instead of ending the
 // program. The default comes back however the search ends, by an error too.
 class InterruptHandler {
@@ -423,23 +435,19 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
     const bool escape = ::isatty(STDOUT_FILENO) == 1 || !colors.reset.empty();
     TextPrinter text(args.contextLines, colors, escape);
 
-    SearchStatus status = SearchStatus::Complete;
-    {
-        const InterruptHandler interrupts;
-        status = searchRepos(targets, request, [&](const ResultFile& file) {
-            found = true;
-            if (json != nullptr) {
-                json->file(file);
-            } else {
-                text.file(file);
-            }
-            // The reader went away (like `| head` after enough lines): stop
-            // now instead of searching on for output nobody reads.
-            if (!std::cout) {
-                throw std::runtime_error("could not write the output");
-            }
-        });
-    }
+    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
+        found = true;
+        if (json != nullptr) {
+            json->file(file);
+        } else {
+            text.file(file);
+        }
+        // The reader went away (like `| head` after enough lines): stop
+        // now instead of searching on for output nobody reads.
+        if (!std::cout) {
+            throw std::runtime_error("could not write the output");
+        }
+    });
     if (json != nullptr) {
         json->finish(status);
     } else if (status == SearchStatus::Truncated) {
@@ -449,9 +457,21 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
     return status;
 }
 
+// Ctrl-C stopped the command: says so, and ends the JSON document.
+int reportCancelled(JsonResultWriter* json) {
+    if (json != nullptr) {
+        json->finish(SearchStatus::Cancelled);
+    }
+    std::cerr << "code-search: cancelled\n";
+    return 130;  // what shells use for "stopped by Ctrl-C"
+}
+
 // The search command, once its arguments are read. With --json, everything
 // goes into `json`; runSearch ends the document if this throws.
 int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
+    // From here on, Ctrl-C stops the command cleanly, even while --path
+    // is still indexing.
+    const InterruptHandler interrupts;
     const ParsedQuery parsed = parseQuery(args.query);
     SearchRequest request{
         .query = parsed.root,
@@ -473,7 +493,15 @@ int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
         if (!repoNamesIn(request.query).empty()) {
             throw QueryError("repo: only works on added repos, not with --path");
         }
-        built = buildRepo(args.repoPath, FileFilter(), pool.get());
+        try {
+            built = buildRepo(args.repoPath, FileFilter(), pool.get(), &gCancelled);
+        } catch (...) {
+            // Ctrl-C also stops Git, which indexing then sees as an error.
+            if (!gCancelled) {
+                throw;
+            }
+            return reportCancelled(json);
+        }
         targets.push_back({.name = "", .index = &built->built.index});
     } else {
         const Workspace workspace(Workspace::defaultRoot());
@@ -493,7 +521,7 @@ int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
     const SearchStatus status = printResults(targets, request, args, json, found);
     if (status == SearchStatus::Cancelled) {
         std::cerr << "code-search: cancelled\n";
-        return 130;  // what shells use for "stopped by Ctrl-C"
+        return 130;
     }
     return found ? 0 : 1;  // like grep: 1 means nothing found
 }
@@ -598,7 +626,7 @@ int runVerify(const std::string& name) {
     const Registry registry = loadRegistry(workspace);
     const RepoEntry* repo = registry.find(name);
     if (repo == nullptr) {
-        std::cerr << "code-search: no repo named " << name << '\n';
+        std::cerr << "code-search: no repo named " << forTerminal(name, STDERR_FILENO) << '\n';
         return 2;
     }
     const std::filesystem::path path = workspace.indexesDir() / repo->index.file;
@@ -613,8 +641,10 @@ int runVerify(const std::string& name) {
                   << '\n';
         return 0;
     } catch (const IndexFileError& error) {
-        std::cerr << "code-search: " << name << " (" << path.string() << "): " << error.what()
-                  << rebuildHint(name) << '\n';
+        // The path is in the data folder, which can be named anything.
+        const std::string message =
+            name + " (" + path.string() + "): " + error.what() + rebuildHint(name);
+        std::cerr << "code-search: " << forTerminal(message, STDERR_FILENO) << '\n';
         return 1;
     }
 }
@@ -637,6 +667,10 @@ int run(std::span<char*> args) {
         const std::optional<SearchArgs> searchArgs = parseSearchArgs(args.subspan(2));
         if (searchArgs.has_value()) {
             return runSearch(searchArgs.value());
+        }
+        // With --json, even bad arguments give one whole JSON document.
+        if (asksForJson(args.subspan(2))) {
+            JsonResultWriter(std::cout).fail("the arguments aren't valid. See: code-search --help");
         }
     } else if (command == "add") {
         const std::optional<AddArgs> addArgs = parseAddArgs(args.subspan(2));

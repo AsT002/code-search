@@ -244,7 +244,7 @@ SearchStatus searchInTurn(std::span<const SearchTarget> targets, const SearchReq
                     return emit(target.name, match.path, match.matches, countLines(match.matches),
                                 content, request, remaining, onFile);
                 },
-                request.cancelled);
+                request.cancelled, !request.filesOnly);
         } catch (const IndexFileError&) {
             rethrowNamed(std::current_exception(), target.name);
         }
@@ -354,6 +354,8 @@ private:
     std::size_t nextChunkFiles();
     void submit(std::unique_ptr<Chunk> chunk, bool next = false);
     void check(Chunk& chunk);
+    Found makeFound(const Evaluator& evaluator, DocId doc, std::string_view path,
+                    std::string_view content) const;
     bool pass(const Repo& repo, Found& found, std::size_t& remaining);
     bool cancelled() const { return request_.cancelled != nullptr && request_.cancelled->load(); }
 
@@ -512,6 +514,30 @@ std::size_t bytesOf(const std::string& path, const std::vector<Match>& matches,
     return bytes;
 }
 
+// A matching file's result, as check() keeps it for the caller.
+ParallelSearch::Found ParallelSearch::makeFound(const Evaluator& evaluator, DocId doc,
+                                                std::string_view path,
+                                                std::string_view content) const {
+    Found found{.doc = doc, .path = std::string(path)};
+    // With filesOnly only the name is shown, so the matches aren't looked for.
+    if (request_.filesOnly) {
+        return found;
+    }
+    const std::vector<Match> matches = locate(content, evaluator.collectSpans(doc, path, content));
+    found.lineCount = countLines(matches);
+    if (found.lineCount == 0) {
+        return found;
+    }
+    const std::size_t kept =
+        request_.maxResults == 0 ? found.lineCount : std::min(found.lineCount, request_.maxResults);
+    found.lines = resultLines(content, matches, request_.contextLines, kept);
+    // Without a limit, every file fits, so they're never needed.
+    if (request_.maxResults != 0) {
+        found.matches = firstLines(matches, kept);
+    }
+    return found;
+}
+
 // Runs on a pool thread: finds which of the chunk's files match.
 void ParallelSearch::check(Chunk& chunk) {
     const Repo& repo = repos_[chunk.repo];
@@ -534,23 +560,10 @@ void ParallelSearch::check(Chunk& chunk) {
                 if (!repo.evaluator->matches(doc, path, content)) {
                     return;
                 }
-                // Made here and added once it's complete, so if something
-                // throws partway (like running out of memory), the chunk
-                // never holds a half-made result.
-                Found found{.doc = doc, .path = std::string(path)};
-                const std::vector<Match> matches =
-                    locate(content, repo.evaluator->collectSpans(doc, path, content));
-                found.lineCount = countLines(matches);
-                if (!request_.filesOnly && found.lineCount != 0) {
-                    const std::size_t kept = request_.maxResults == 0
-                                                 ? found.lineCount
-                                                 : std::min(found.lineCount, request_.maxResults);
-                    found.lines = resultLines(content, matches, request_.contextLines, kept);
-                    // Without a limit, every file fits, so they're never needed.
-                    if (request_.maxResults != 0) {
-                        found.matches = firstLines(matches, kept);
-                    }
-                }
+                // Made whole before it's added, so if something throws
+                // partway (like running out of memory), the chunk never
+                // holds a half-made result.
+                Found found = makeFound(repo.evaluator.value(), doc, path, content);
                 const std::size_t bytes = bytesOf(found.path, found.matches, found.lines);
                 chunk.found.push_back(std::move(found));
                 chunk.bytes += bytes;

@@ -145,5 +145,22 @@ TEST(RegexSearch, TheIndexStillNarrowsAsciiRegexes) {
     EXPECT_EQ(regexFinds("fo+ba[rz]", "x foooobaz y", false), std::vector<std::string>{"a.txt"});
 }
 
+// Without case, a k or s in the text may be KELVIN SIGN or LONG S, so only
+// the text between them is required. That still narrows the search.
+TEST(RegexSearch, TextAroundKAndSStillNarrows) {
+    const TrigramQuery plan = planCandidates(regex("MustCompile\\(\""), SearchOptions{});
+    EXPECT_FALSE(std::holds_alternative<AllQuery>(plan.value));
+    EXPECT_EQ(regexFinds("mustcompile",
+                         "Mu\xC5\xBF"
+                         "tCompile",
+                         false),
+              std::vector<std::string>{"a.txt"});
+    EXPECT_EQ(regexFinds("breakpoint",
+                         "brea\xE2\x84\xAA"
+                         "point",
+                         false),
+              std::vector<std::string>{"a.txt"});
+}
+
 }  // namespace
 }  // namespace codesearch

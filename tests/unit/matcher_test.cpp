@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cctype>
 #include <chrono>
+#include <cstdint>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -8,6 +11,8 @@
 #include "codesearch/search/evaluator.hpp"
 #include "codesearch/search/literal_matcher.hpp"
 #include "codesearch/search/regex_matcher.hpp"
+
+#include <re2/re2.h>
 
 namespace codesearch {
 namespace {
@@ -50,6 +55,78 @@ TEST(LiteralMatcher, StopsWhenAsked) {
         return false;
     });
     EXPECT_EQ(calls, 1);
+}
+
+// Non-overlapping matches by comparing at every position, the plain way.
+std::vector<Span> plainScan(std::string_view pattern, std::string_view text, bool caseSensitive) {
+    const auto same = [&](char a, char b) {
+        if (!caseSensitive) {
+            a = static_cast<char>(std::tolower(static_cast<unsigned char>(a)));
+            b = static_cast<char>(std::tolower(static_cast<unsigned char>(b)));
+        }
+        return a == b;
+    };
+    std::vector<Span> spans;
+    std::size_t i = 0;
+    while (i + pattern.size() <= text.size()) {
+        std::size_t j = 0;
+        while (j < pattern.size() && same(text[i + j], pattern[j])) {
+            ++j;
+        }
+        if (j == pattern.size()) {
+            spans.push_back(Span{i, i + j});
+            i += j;
+        } else {
+            ++i;
+        }
+    }
+    return spans;
+}
+
+// Patterns over 64 bytes take another route. Check it against a plain scan
+// on text made of pieces of the pattern, where partial matches are common.
+TEST(LiteralMatcher, LongPatternsMatchAPlainScan) {
+    // A fixed seed, so a failure comes back the same way.
+    std::mt19937 rng(5);  // NOLINT(cert-msc32-c,cert-msc51-cpp,bugprone-random-generator-seed)
+    const auto number = [&](std::size_t lo, std::size_t hi) {
+        return std::uniform_int_distribution<std::size_t>(lo, hi)(rng);
+    };
+    constexpr std::string_view kAlphabet = "aAb";
+    for (int round = 0; round < 2000; ++round) {
+        std::string pattern;
+        for (std::size_t n = number(65, 72); n > 0; --n) {
+            pattern += kAlphabet[number(0, 2)];
+        }
+        std::string text;
+        while (text.size() < 300) {
+            const std::size_t from = number(0, pattern.size() - 1);
+            text += pattern.substr(from, number(1, pattern.size() - from));
+            if (number(0, 3) == 0) {
+                text += kAlphabet[number(0, 2)];
+            }
+        }
+        for (const bool caseSensitive : {true, false}) {
+            ASSERT_EQ(findAll(pattern, text, caseSensitive),
+                      plainScan(pattern, text, caseSensitive))
+                << pattern << " in " << text << (caseSensitive ? "" : ", ignoring case");
+        }
+    }
+}
+
+// For "aaa...b...aaa" in "aaa...", every position passes the test of the
+// first and last bytes. Comparing the pattern at each one would take time
+// growing with text size times pattern size: minutes here.
+TEST(LiteralMatcher, RepetitiveTextStaysFast) {
+    const std::string text(std::size_t{1} << 20U, 'a');
+    const std::string half(std::size_t{1} << 15U, 'a');
+    const std::string pattern = half + "b" + half;
+    for (const bool caseSensitive : {true, false}) {
+        const auto start = std::chrono::steady_clock::now();
+        EXPECT_TRUE(findAll(pattern, text, caseSensitive).empty());
+        const auto seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        EXPECT_LT(seconds, 10.0);
+    }
 }
 
 TEST(Evaluator, AndNeedsEveryLiteral) {
@@ -189,23 +266,20 @@ TEST(RegexMatcher, AnyByteStaysWithinALine) {
 
 // Finding every match could take time growing with the square of a line's
 // length: for /a*z|/ on a line of a's, each search looks to the line's end
-// for a z. The work is capped, so this takes milliseconds, not minutes.
+// for a z. findAll stops after a time limit, so this takes a fraction of a
+// second, not minutes.
 TEST(RegexMatcher, FindingAllMatchesStaysFast) {
     const std::string line(200000, 'a');
     for (const std::string_view pattern : {"a*z|", "a*z|a"}) {
         SCOPED_TRACE(pattern);
         const auto start = std::chrono::steady_clock::now();
-        std::size_t found = 0;
-        RegexMatcher(pattern, true).findAll(line, [&](Span) {
-            ++found;
-            return true;
-        });
+        regexSpans(pattern, line);
         const auto seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         EXPECT_LT(seconds, 20.0);
     }
-    // Short lines get no budget, which is safe only if no search runs past
-    // its line. With \C one could, unless it's held to its line.
+    // The same with \C, whose searches are held to their line, over many
+    // short lines.
     std::string shortLines;
     for (int i = 0; i < 20000; ++i) {
         shortLines += "aaaaaaaaa\n";
@@ -213,20 +287,43 @@ TEST(RegexMatcher, FindingAllMatchesStaysFast) {
     for (const std::string_view pattern : {"\\C*z|", "\\C*z|a"}) {
         SCOPED_TRACE(pattern);
         const auto start = std::chrono::steady_clock::now();
-        const std::size_t found = regexSpans(pattern, shortLines).size();
+        regexSpans(pattern, shortLines);
         const auto seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         EXPECT_LT(seconds, 20.0);
-        EXPECT_EQ(found, pattern.ends_with('a') ? 180000U : 0U);
     }
-    // Lines of up to 1,024 bytes are never cut short, however dense the
-    // matches. On a longer line, very dense matches can be.
-    EXPECT_EQ(regexSpans("e", std::string(1024, 'e')).size(), 1024U);
-    std::string lines;
-    for (int i = 0; i < 50; ++i) {
-        lines += std::string(1000, 'e') + "\n";
+}
+
+// Ordinary regexes highlight every match, however long the line, like
+// plain text does. (findAll's time limit allows 1 microsecond per byte; a
+// release build takes a twentieth of that even with a match on every
+// byte, but sanitizer builds are much slower, so these are less dense.)
+TEST(RegexMatcher, LongLinesKeepEveryMatch) {
+    std::string words;
+    for (int i = 0; i < 1000; ++i) {
+        words += "foo ";
     }
-    EXPECT_EQ(regexSpans("e", lines).size(), 50000U);
+    EXPECT_EQ(regexSpans("foo", words).size(), 1000U);
+    std::string list = "var x=[0";
+    for (int i = 1; i < 2000; ++i) {
+        list += "," + std::to_string(i);
+    }
+    EXPECT_EQ(regexSpans(",", list).size(), 1999U);
+    EXPECT_EQ(regexSpans("\\d+", list).size(), 2000U);
+    std::string sparse;
+    for (int i = 0; i < 10000; ++i) {
+        sparse += "xxxxxxxxxe";
+    }
+    EXPECT_EQ(regexSpans("e", sparse).size(), 10000U);
+}
+
+// RE2's default 8 MiB is too little for patterns like
+// /(a|b).{1000}(a|b){1000}c/: on 1 MiB, 17 s instead of 0.06 s with 64 MiB
+// in a release build. Checked by the setting, since building that much
+// fast-matcher state takes long in sanitizer builds.
+TEST(RegexMatcher, BigPatternsGetEnoughMemory) {
+    EXPECT_EQ(RegexMatcher("a", true).compiled().options().max_mem(),
+              std::int64_t{64} * 1024 * 1024);
 }
 
 TEST(RegexMatcher, BadPatternsAreRejected) {

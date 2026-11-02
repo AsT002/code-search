@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <new>
 #include <system_error>
 
 // The current process's environment variables, passed on as they are.
@@ -234,12 +235,21 @@ Process::Process(const std::string& program, const std::vector<std::string>& arg
     const int stderrFd = take(err.readEnd);
 
     // Read the error output on its own thread until the child closes it.
+    // An exception can't leave a thread (it would end the program), so if
+    // memory runs out, that's noted for errorOutput() to report, and the
+    // rest is read and dropped, so the child never blocks on a full pipe.
     stderrReader_ = std::thread([this, stderrFd] {
         std::array<char, 4096> chunk{};
         while (true) {
             const ssize_t n = ::read(stderrFd, chunk.data(), chunk.size());
             if (n > 0) {
-                stderr_.append(chunk.data(), static_cast<std::size_t>(n));
+                if (!stderrLost_) {
+                    try {
+                        stderr_.append(chunk.data(), static_cast<std::size_t>(n));
+                    } catch (const std::bad_alloc&) {
+                        stderrLost_ = true;
+                    }
+                }
             } else if (n == 0 || errno != EINTR) {
                 break;
             }
@@ -341,6 +351,13 @@ std::string Process::readAll() {
     buffer_.clear();
     bufferPos_ = 0;
     return rest;
+}
+
+const std::string& Process::errorOutput() const {
+    if (stderrLost_) {
+        throw std::bad_alloc();
+    }
+    return stderr_;
 }
 
 int Process::wait() {

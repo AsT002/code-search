@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -136,7 +139,29 @@ TEST(Cli, BadArgumentsPrintUsage) {
         const ProcessResult result = codeSearch(args);
         EXPECT_EQ(result.exitCode, 2) << ::testing::PrintToString(args);
         EXPECT_TRUE(contains(result.err, "usage:")) << ::testing::PrintToString(args);
+        EXPECT_EQ(result.out, "") << ::testing::PrintToString(args);
     }
+}
+
+// With --json, bad arguments still give one whole JSON document, as every
+// other error does. A "--json" that's the query, after "--", doesn't count.
+TEST(Cli, BadArgumentsWithJsonGiveJson) {
+    for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
+             {"search", "--json", "-C", "abc", "foo"},
+             {"search", "--json", "-x"},
+             {"search", "a", "--json", "b"},
+         }) {
+        const ProcessResult result = codeSearch(args);
+        EXPECT_EQ(result.exitCode, 2) << ::testing::PrintToString(args);
+        EXPECT_EQ(result.out,
+                  "{\"files\":[],\"status\":\"error\",\"error\":\"the arguments aren't valid. "
+                  "See: code-search --help\"}\n")
+            << ::testing::PrintToString(args);
+        EXPECT_TRUE(contains(result.err, "usage:")) << result.err;
+    }
+    const ProcessResult result = codeSearch({"search", "--path", ".", "--", "--json", "x"});
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_EQ(result.out, "");
 }
 
 TEST(CliErrors, NotARepo) {
@@ -176,6 +201,45 @@ TEST(CliErrors, EarlyErrorsAreJsonToo) {
     result = codeSearch({"search", "--json", "x"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
     EXPECT_TRUE(contains(result.out, "\"error\":\"no repos added yet")) << result.out;
+}
+
+// Ctrl-C while --path is still indexing must end the JSON document, not
+// leave it empty. A "git" in front of the real one makes reading files
+// hang, so the Ctrl-C lands then. Like a real Ctrl-C, it goes to the whole
+// process group, Git too: `set -m` gives the background job its own group,
+// which `kill -INT -<pid>` signals.
+TEST(CliErrors, CtrlCWhileIndexingEndsTheJson) {
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir bin;
+    const std::string realGit = runProcess("sh", {"-c", "command -v git"}).out;
+    ASSERT_FALSE(realGit.empty());
+    {
+        std::ofstream script(bin.dir() / "git");
+        script << "#!/bin/sh\n"
+                  "case \"$*\" in *cat-file*) sleep 30 ;; esac\n"
+                  "exec "
+               << realGit.substr(0, realGit.size() - 1) << " \"$@\"\n";
+    }
+    std::filesystem::permissions(bin.dir() / "git", std::filesystem::perms::owner_all);
+    const std::string driver =
+        "set -m\n"
+        "\"$1\" search --path \"$2\" --json line 2>/dev/null &\n"
+        "pid=$!\n"
+        "sleep 1\n"
+        "kill -INT -\"$pid\"\n"
+        "wait \"$pid\"\n"
+        "echo \"exit $?\" >&2\n";
+    const char* path = std::getenv("PATH");  // NOLINT(concurrency-mt-unsafe)
+    const ProcessResult result =
+        runProcess("sh", {"-c", driver, "sh", CODE_SEARCH_BIN, repo.dir().string()},
+                   {
+                       "CODE_SEARCH_HOME=/nonexistent/code-search-home",
+                       "PATH=" + bin.dir().string() + ":" + (path == nullptr ? "" : path),
+                   });
+    EXPECT_EQ(result.out, "{\"files\":[],\"status\":\"cancelled\"}\n");
+    // The shell may print a job notice first.
+    EXPECT_TRUE(result.err.ends_with("exit 130\n")) << result.err;
 }
 
 TEST(CliErrors, UnreadableHeadCommitIsAnError) {
@@ -780,6 +844,26 @@ TEST(CliRepos, FolderNamesAreShownNotSentToTheTerminal) {
     }
     // Into a pipe, the bytes stay as they are.
     EXPECT_TRUE(contains(codeSearch({"add", git, "--name", "evil"}, home.dir()).out, "ev\x1b]0;"));
+#endif
+}
+
+// verify's messages name the index file, inside the data folder, which can
+// be named anything too.
+TEST(CliRepos, VerifyMessagesAreShownNotSentToTheTerminal) {
+#ifndef __APPLE__
+    GTEST_SKIP() << "uses macOS's script to get a terminal";
+#else
+    TempRepo repo;
+    fillRepo(repo);
+    const TempDir dir;
+    const std::filesystem::path home = dir.dir() / "ho\x1b]0;PWNED\x07me";
+    ASSERT_EQ(codeSearch({"add", repo.dir().string(), "--name", "demo"}, home).exitCode, 0);
+    testing::writeFile(std::filesystem::directory_iterator(home / "indexes")->path(), "hello");
+    for (const std::string& name : {std::string("demo"), std::string("no\x1b]0;PWNED\x07pe")}) {
+        const ProcessResult result = onATerminal({"verify", name}, home);
+        EXPECT_FALSE(contains(result.out, "\x1b]0;")) << result.out;
+        EXPECT_TRUE(contains(result.out, "\\x1b]0;PWNED\\x07")) << result.out;
+    }
 #endif
 }
 

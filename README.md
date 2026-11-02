@@ -88,7 +88,8 @@ The full rules are in [What a query means](docs/ARCHITECTURE.md#what-a-query-mea
 
 Results look like `my-backend:src/auth.ts:12:14:export function authenticate`.
 Exit codes work like grep: 0 found something, 1 found nothing, 2 error. A
-search stopped with Ctrl-C prints what it found so far and exits with 130.
+search stopped with Ctrl-C prints what it found so far and exits with 130,
+even while `--path` is still indexing.
 `verify` exits with 0 if the index is fine, 1 if it is damaged, and 2 if it
 can't be read at all.
 

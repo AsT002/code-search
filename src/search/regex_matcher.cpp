@@ -4,7 +4,8 @@
 #include <re2/regexp.h>
 
 #include <algorithm>
-#include <limits>
+#include <chrono>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -17,12 +18,21 @@ namespace {
 // The options every regex uses. RE2 would print errors itself without
 // log_errors(false); we report them in the query error instead.
 // never_nl: a match never takes in a '\n', so it stays within a line, as
-// with grep. That also keeps the search for each match within its line.
+// with grep (except with \C, see matchesAnyByte).
+// max_mem: what RE2 may use for one regex, mostly for its DFA, the fast
+// way it matches. When that runs out it falls back to a way that costs text
+// size times pattern size: for /(a|b).{1000}(a|b){1000}c/ on 1 MiB, 17 s
+// with the default 8 MiB and 0.06 s with 64 MiB. It's a cap, not an
+// allocation. Some patterns, like /a.{1000}c/, need more states than any
+// cap allows and stay slow on long lines.
+constexpr std::int64_t kRegexMemory = std::int64_t{64} * 1024 * 1024;
+
 RE2::Options optionsFor(bool caseSensitive) {
     RE2::Options options;
     options.set_case_sensitive(caseSensitive);
     options.set_never_nl(true);
     options.set_log_errors(false);
+    options.set_max_mem(kRegexMemory);
     return options;
 }
 
@@ -33,10 +43,33 @@ std::string withLineAnchors(std::string_view pattern) {
     return "(?m)" + std::string(pattern);
 }
 
-// Lines findAll searches in full, and how much work it allows per byte of
-// a longer line (see there).
-constexpr std::size_t kShortLine = 1024;
-constexpr std::size_t kWorkPerByte = 256;
+// How long findAll may look for matches in one text: kHighlightTime, plus
+// kHighlightTimePerByte for each byte of it. Finding even very dense
+// matches takes far less per byte; time that grows with the square of a
+// line's length takes far more. And how many searches findAll makes
+// between looks at the clock (see there).
+constexpr std::chrono::milliseconds kHighlightTime{100};
+constexpr std::chrono::microseconds kHighlightTimePerByte{1};
+constexpr unsigned kSearchesPerClockCheck = 16;
+
+// findAll's time limit for a text of `bytes` bytes.
+class HighlightClock {
+public:
+    explicit HighlightClock(std::size_t bytes)
+        : deadline_(std::chrono::steady_clock::now() + kHighlightTime +
+                    (kHighlightTimePerByte * bytes)) {}
+
+    // Called before each search. Reading the clock costs about as much as
+    // a short search, so it's read every kSearchesPerClockCheck calls.
+    bool timeIsUp() {
+        return ++searches_ % kSearchesPerClockCheck == 0 &&
+               std::chrono::steady_clock::now() > deadline_;
+    }
+
+private:
+    std::chrono::steady_clock::time_point deadline_;
+    unsigned searches_ = 0;
+};
 
 // True if the regex uses \C, which matches any one byte. never_nl doesn't
 // stop \C from matching a '\n', so a regex with it is searched one line at a
@@ -58,35 +91,14 @@ bool matchesAnyByte(const RE2& re) {
     return false;
 }
 
-// The work findAll allows for the searches on one line (see there).
-class LineBudget {
-public:
-    // Charges a search from `from` the rest of its line. False if that's
-    // more than the line has left.
-    bool charge(std::string_view text, std::size_t from) {
-        if (!known_ || from > end_) {  // a new line
-            end_ = std::min(text.find('\n', from), text.size());
-            const std::size_t rest = end_ - from;
-            left_ =
-                rest <= kShortLine ? std::numeric_limits<std::size_t>::max() : kWorkPerByte * rest;
-            known_ = true;
-        }
-        const std::size_t cost = end_ - from + 1;
-        if (cost > left_) {
-            return false;
-        }
-        left_ -= cost;
-        return true;
+// Where a match can start next after `at`: the next character, since RE2
+// only starts matches at characters, or with \C (`anyByte`) the next byte.
+std::size_t nextStart(std::string_view text, std::size_t at, bool anyByte) {
+    if (anyByte) {
+        return at + 1;
     }
-
-    // Where the line of the last search charged ends.
-    std::size_t end() const { return end_; }
-
-private:
-    std::size_t end_ = 0;
-    std::size_t left_ = 0;
-    bool known_ = false;
-};
+    return at + std::max<std::size_t>(utf8Length(text, at), 1);
+}
 
 }  // namespace
 
@@ -132,22 +144,23 @@ bool RegexMatcher::foundIn(std::string_view text) const {
 void RegexMatcher::findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const {
     // Each search for a match is linear, but finding all of them isn't
     // always: for /a*z|a/ on a line of a's, every search runs to the end of
-    // the line to see if a*z matches, before taking the a. A search never
-    // runs past its line (never_nl), so charging each one the rest of its
-    // line is a safe upper bound on its work. Lines up to kShortLine bytes,
-    // which is nearly all code, are never cut short. On a longer line, once
-    // the charges reach kWorkPerByte per byte of it, the rest of that line
-    // isn't searched: the file still matches, but that line's remaining
-    // matches aren't highlighted. A regex with \C could run past its line,
-    // so each of its searches ends at the line's end instead.
-    LineBudget line;
+    // the line to see if a*z matches, before taking the a, so the time
+    // grows with the square of the line's length. RE2 can't say how much
+    // work a search did, so findAll stops after a time limit instead: the
+    // file still matches, but the rest of its matches aren't highlighted.
+    // Ordinary files take a tiny part of that. A regex with \C could run
+    // past its line, so each of its searches ends at the line's end.
+    HighlightClock clock(text.size());
+    std::size_t lineEnd = 0;  // where the line `from` is on ends, with \C
+    bool lineKnown = false;
     std::size_t from = 0;
     while (from <= text.size()) {
-        const bool allowed = line.charge(text, from);
-        const std::size_t lineEnd = line.end();
-        if (!allowed) {
-            from = lineEnd + 1;  // give up on this line, go on with the next
-            continue;
+        if (clock.timeIsUp()) {
+            return;
+        }
+        if (anyByte_ && (!lineKnown || from > lineEnd)) {
+            lineEnd = std::min(text.find('\n', from), text.size());
+            lineKnown = true;
         }
 
         std::string_view found;
@@ -168,13 +181,12 @@ void RegexMatcher::findAll(std::string_view text, const std::function<bool(Span)
             }
             from = begin + found.size();  // the next match starts after this one
         } else {
-            // An empty match isn't shown. Look again from the next character,
-            // so the search moves on; RE2 only starts matches at characters,
-            // except with \C.
+            // An empty match isn't shown. Look again from the next place a
+            // match can start, so the search moves on.
             if (begin == text.size()) {
                 return;
             }
-            from = begin + (anyByte_ ? 1 : std::max<std::size_t>(utf8Length(text, begin), 1));
+            from = nextStart(text, begin, anyByte_);
         }
     }
 }

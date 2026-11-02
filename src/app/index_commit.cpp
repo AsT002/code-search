@@ -153,13 +153,16 @@ private:
 }  // namespace
 
 CommitIndex indexCommit(const GitRepo& repo, const ObjectId& commit, const FileFilter& filter,
-                        ThreadPool* pool) {
+                        ThreadPool* pool, const std::atomic<bool>* cancelled) {
     IndexBuilder builder;
     IngestReport report;
     BlobStream blobs(repo);
     ParallelAdder adder(builder, pool);
 
     for (const TreeEntry& entry : repo.listFiles(commit)) {
+        if (cancelled != nullptr && cancelled->load()) {
+            throw IndexingCancelled();
+        }
         if (entry.kind == EntryKind::Symlink) {
             countSkipped(report, SkipReason::Symlink, entry.size);
             continue;
