@@ -372,6 +372,12 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   `\d{4}-\d{2}-\d{2}`) can't be narrowed by any analysis of required text.
 - Regexes under `-` or in an `or` branch don't use the index shortcut that
   literals there get.
+- A review after M8 found the prefilter rules incomplete (LONG S for `s`,
+  `(?i)` inside the pattern, octal escapes), the group around the pattern
+  broke `\Q`, finding every match could take quadratic time, `// /foo/` read
+  as one regex, and many `/usr/bin` words parsed in quadratic time. All fixed
+  with tests. Matches now stay within a line (RE2's `never_nl`), and on lines
+  over 1,024 bytes the work of highlighting is capped.
 
 - `RegexMatcher` with RE2, and a brute-force RE2 reference with the same options.
 - v1: a regex becomes `All`, and RE2 checks every file the rest of the query

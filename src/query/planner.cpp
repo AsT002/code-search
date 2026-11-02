@@ -246,9 +246,38 @@ bool mayNameNonAscii(std::string_view pattern) {
     const bool nonAsciiByte = std::any_of(pattern.begin(), pattern.end(), [](char c) {
         return static_cast<unsigned char>(c) >= 0x80;
     });
-    return nonAsciiByte || pattern.find("\\x{") != std::string_view::npos ||
+    // An octal escape like \577 (LONG S) too: a backslash and a digit.
+    bool octal = false;
+    for (std::size_t i = 0; i + 1 < pattern.size(); ++i) {
+        if (pattern[i] == '\\') {
+            octal = octal || (pattern[i + 1] >= '0' && pattern[i + 1] <= '9');
+            ++i;  // skip what the backslash escapes
+        }
+    }
+    return nonAsciiByte || octal || pattern.find("\\x{") != std::string_view::npos ||
            pattern.find("\\p") != std::string_view::npos ||
            pattern.find("\\P") != std::string_view::npos;
+}
+
+// True if `pattern` turns case folding on itself, with a flag like (?i) or
+// (?si:...). Then RE2 folds case even under case:yes. Any 'i' among the
+// flags counts, even after a '-' that turns it off: that only makes the
+// plan check more files.
+bool hasCaseFlag(std::string_view pattern) {
+    for (std::size_t at = pattern.find("(?"); at != std::string_view::npos;
+         at = pattern.find("(?", at + 2)) {
+        for (std::size_t i = at + 2; i < pattern.size(); ++i) {
+            const char c = pattern[i];
+            if (c == 'i') {
+                return true;
+            }
+            const bool flag = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-';
+            if (!flag) {
+                break;  // the end of the flags
+            }
+        }
+    }
+    return false;
 }
 
 // Turns RE2's prefilter tree into candidates. Its atoms are pieces of text,
@@ -270,7 +299,10 @@ TrigramQuery fromPrefilter(re2::Prefilter& node, bool caseSensitive) {
             const bool ascii = std::all_of(atom.begin(), atom.end(), [](char c) {
                 return static_cast<unsigned char>(c) < 0x80;
             });
-            if (!ascii || (!caseSensitive && atom.find('k') != std::string::npos)) {
+            // RE2 folds k with KELVIN SIGN and s with LONG S, the only ASCII
+            // letters it folds with something outside ASCII.
+            const bool foldsOutsideAscii = atom.find_first_of("ks") != std::string::npos;
+            if (!ascii || (!caseSensitive && foldsOutsideAscii)) {
                 return {AllQuery{}};
             }
             return planLiteral(LiteralNode{atom});
@@ -297,8 +329,11 @@ TrigramQuery planRegex(const RegexNode& node, bool caseSensitive) {
     // Compiled the way RegexMatcher compiles it, so the tree fits what's run.
     RE2::Options re2Options;
     re2Options.set_case_sensitive(caseSensitive);
+    re2Options.set_never_nl(true);
     re2Options.set_log_errors(false);
-    const RE2 compiled("(?m)(?:" + node.pattern + ")", re2Options);
+    const RE2 compiled("(?m)" + node.pattern, re2Options);
+    // A flag in the pattern can fold case even under case:yes.
+    caseSensitive = caseSensitive && !hasCaseFlag(node.pattern);
     if (!compiled.ok()) {
         return {AllQuery{}};
     }

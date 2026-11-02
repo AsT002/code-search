@@ -62,8 +62,9 @@ bool contains(std::string_view text, std::string_view pattern, bool caseSensitiv
 std::unique_ptr<RE2> compileRegex(const std::string& pattern, bool caseSensitive) {
     RE2::Options options;
     options.set_case_sensitive(caseSensitive);
+    options.set_never_nl(true);
     options.set_log_errors(false);
-    return std::make_unique<RE2>("(?m)(?:" + pattern + ")", options);
+    return std::make_unique<RE2>("(?m)" + pattern, options);
 }
 
 // Bytes in the character at text[i]: RE2 only starts matches at characters.

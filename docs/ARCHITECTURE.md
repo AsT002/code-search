@@ -487,9 +487,9 @@ is a breaking change.
 | Queries with no search text, like `lang:go` or `-foo` | Return matching files, with nothing highlighted |
 | What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
-| `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
-| What makes a regex | A word that starts with `/` and ends with `/` before a space, `)` or the end. Otherwise it's text: `/usr/bin` and `// TODO` search for those words. A regex RE2 can't compile is an error with RE2's message |
-| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file |
+| `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` stops at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
+| What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message |
+| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. On a line longer than 1,024 bytes with very many matches, highlighting can stop partway along it (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
 | Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
@@ -683,9 +683,17 @@ code-search search "authenticate"
 ### Regex
 
 We use RE2, never `std::regex`. RE2 runs in linear time, so a bad pattern can't
-hang a search. `RegexMatcher` compiles each pattern once, as `(?m)(?:pattern)`
-so `^` and `$` work per line, and checks the pattern on its own first: inside
-the group, `a)(b` would turn valid.
+hang a search. `RegexMatcher` compiles each pattern once, as `(?m)pattern` so
+`^` and `$` work per line, with RE2's `never_nl` so no match takes in a line
+ending. There's no group around the pattern: a `\Q` without `\E` would
+quote its `)`.
+
+Each search for a match is linear, but finding every match on a line can
+take time growing with the square of the line's length: for `/a*z|a/` on a
+line of `a`s, each search looks to the line's end for a `z`. Lines of up to
+1,024 bytes are searched in full. On a longer line, each search is charged
+the rest of the line, an upper bound on its work, and once that reaches 256
+per byte of the line, the rest of it isn't highlighted.
 
 1. v1 (done): a regex is `All`, and RE2 checks every file the rest of the query
    allows. The correct baseline.
@@ -699,10 +707,12 @@ The prefilter lowercases with Unicode rules, and the index folds only ASCII.
 Where those differ, the index could miss a match, so:
 
 - A pattern that can name a non-ASCII character (with its bytes, `\x{...}`,
-  `\p` or `\P`) is `All`. Some lowercase into ASCII: U+212A KELVIN SIGN
+  an octal escape like `\577`, `\p` or `\P`) is `All`. Some lowercase into ASCII: U+212A KELVIN SIGN
   becomes `k`.
-- Without `case:yes`, an atom with a `k` is `All`: RE2 then also matches
-  KELVIN SIGN for it.
+- Without `case:yes`, or with a `(?i)` flag in the pattern, an atom with a
+  `k` or an `s` is `All`: RE2 then also matches KELVIN SIGN for `k` and LONG S
+  for `s`. Those are the only ASCII letters it folds with anything outside
+  ASCII (checked against every code point).
 - An atom with non-ASCII bytes is `All`. After the first rule, these only
   come from case variants like LONG S for `s`, which the index keeps as they
   are; it's a second guard.

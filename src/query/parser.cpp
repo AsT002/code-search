@@ -2,6 +2,7 @@
 
 #include <re2/re2.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -111,51 +112,69 @@ Token readWord(std::string_view input, std::size_t& pos) {
     return token;
 }
 
-// Reads a regex starting at input[pos], which is its opening '/'. The
-// pattern runs to the next '/' that isn't escaped and is followed by a
-// space, a ')' or the end. Backslashes stay as they are, for RE2, except
-// that \/ stands for '/'. Returns nothing, and leaves `pos` alone, if
-// there's no such '/' or the pattern would be empty: then it's plain text,
-// so "// TODO" and "/usr/bin" still search for text.
-std::optional<std::string> readRegex(std::string_view input, std::size_t& pos) {
+// Where a regex can end: each '/' that isn't escaped (it has an even number
+// of backslashes right before it) and is followed by a space, a ')' or the
+// end. Found once for the whole query, so reading a regex never scans the
+// rest of the query again: a query of many words like /usr/bin stays fast.
+std::vector<std::size_t> regexEnds(std::string_view input) {
+    std::vector<std::size_t> ends;
+    std::size_t backslashes = 0;
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const char c = input[i];
+        if (c == '/' && backslashes % 2 == 0) {
+            const bool closes =
+                i + 1 == input.size() || isSpace(input[i + 1]) || input[i + 1] == ')';
+            if (closes) {
+                ends.push_back(i);
+            }
+        }
+        backslashes = c == '\\' ? backslashes + 1 : 0;
+    }
+    return ends;
+}
+
+// Reads a regex starting at input[pos], its opening '/'. The pattern runs to
+// the first place after it where a regex can end (`ends`, from regexEnds).
+// Backslashes stay as they are, for RE2, except that \/ stands for '/'.
+// Returns nothing, and leaves `pos` alone, if there's no such place or the
+// pattern would be empty: then it's plain text. So "/usr/bin" and "// TODO"
+// search for text, and "// /foo/" is the text // and the regex foo.
+std::optional<std::string> readRegex(std::string_view input, std::size_t& pos,
+                                     const std::vector<std::size_t>& ends) {
+    // lower_bound: the first place after the opening '/', by binary search.
+    const auto end = std::lower_bound(ends.begin(), ends.end(), pos + 1);
+    if (end == ends.end() || *end == pos + 1) {
+        return std::nullopt;
+    }
     std::string pattern;
-    std::size_t at = pos + 1;
-    while (at < input.size()) {
-        const char c = input[at];
-        if (c == '\\' && at + 1 < input.size()) {
+    for (std::size_t at = pos + 1; at < *end; ++at) {
+        if (input[at] == '\\' && at + 1 < *end) {
             if (input[at + 1] == '/') {
                 pattern += '/';
             } else {
                 pattern += input.substr(at, 2);
             }
-            at += 2;
+            ++at;
             continue;
         }
-        if (c == '/') {
-            const bool ends =
-                at + 1 == input.size() || isSpace(input[at + 1]) || input[at + 1] == ')';
-            if (ends && !pattern.empty()) {
-                pos = at + 1;
-                return pattern;
-            }
-        }
-        pattern += c;
-        ++at;
+        pattern += input[at];
     }
-    return std::nullopt;
+    pos = *end + 1;
+    return pattern;
 }
 
 // A regex token at input[pos]: /pattern/ on its own, or as the value of
 // path: or file:. Moves `pos` past it. Returns nothing, and leaves `pos`
 // alone, if there isn't one (see readRegex).
-std::optional<Token> regexToken(std::string_view input, std::size_t& pos) {
+std::optional<Token> regexToken(std::string_view input, std::size_t& pos,
+                                const std::vector<std::size_t>& ends) {
     const std::string_view rest = input.substr(pos);
     const bool forPath = rest.starts_with("path:/") || rest.starts_with("file:/");
     std::size_t start = forPath ? pos + 5 : pos;
     if (input[start] != '/') {
         return std::nullopt;
     }
-    std::optional<std::string> pattern = readRegex(input, start);
+    std::optional<std::string> pattern = readRegex(input, start, ends);
     if (!pattern.has_value()) {
         return std::nullopt;
     }
@@ -168,6 +187,7 @@ std::optional<Token> regexToken(std::string_view input, std::size_t& pos) {
 }
 
 std::vector<Token> tokenize(std::string_view input) {
+    const std::vector<std::size_t> ends = regexEnds(input);
     std::vector<Token> tokens;
     std::size_t pos = 0;
     while (true) {
@@ -199,7 +219,7 @@ std::vector<Token> tokenize(std::string_view input) {
                 continue;
             }
         }
-        if (std::optional<Token> pattern = regexToken(input, pos)) {
+        if (std::optional<Token> pattern = regexToken(input, pos, ends)) {
             tokens.push_back(std::move(pattern.value()));
             continue;
         }

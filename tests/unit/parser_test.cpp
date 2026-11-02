@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <random>
 #include <string>
 #include <vector>
@@ -96,6 +97,10 @@ TEST(Parser, Regexes) {
     EXPECT_EQ(parsed("/usr/bin"), literal("/usr/bin"));
     EXPECT_EQ(parsed("// TODO"), allOf({literal("//"), literal("TODO")}));
     EXPECT_EQ(parsed("a/b/"), literal("a/b/"));
+    // A regex ends at the first '/' that can end one. If that leaves it
+    // empty, the word is text: "//" can't start a regex that runs on.
+    EXPECT_EQ(parsed("// /foo/"), allOf({literal("//"), regex("foo")}));
+    EXPECT_EQ(parsed(R"(/\Qfoo/)"), regex(R"(\Qfoo)"));
     EXPECT_EQ(parsed("\"/x/\""), literal("/x/"));
 }
 
@@ -150,6 +155,20 @@ TEST(Parser, LimitsNesting) {
     }
     expectError(dashes + "a", "nested too deeply");
     expectError(std::string(100000, '('), "nested too deeply");
+}
+
+// Many words that start with '/' but aren't regexes. Looking for each
+// one's end used to scan the rest of the query, which took seconds.
+TEST(Parser, ManySlashWordsParseFast) {
+    std::string text;
+    for (int i = 0; i < 40000; ++i) {
+        text += "/usr/bin ";
+    }
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_NO_THROW(parseQuery(text));
+    const auto seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    EXPECT_LT(seconds, 5.0);
 }
 
 TEST(Parser, LongQueriesWork) {

@@ -77,7 +77,7 @@ With `--json` the output is always one JSON document, even after an error.
 | `-foo` | files without foo |
 | `(a or b) c` | parentheses group |
 | `"foo bar"`, `\-x` | text as it is |
-| `/fo+ (bar\|baz)/` | a regex, in RE2 syntax; `^` and `$` match at each line |
+| `/fo+ (bar\|baz)/` | a regex, in RE2 syntax; matches stay within a line, and `^` and `$` match at each line |
 | `repo:name` | only this repo |
 | `path:text`, `file:text` | the path contains the text |
 | `path:/\.go$/` | the path matches the regex |

@@ -143,6 +143,8 @@ def plain_text(query):
         return (text, case_sensitive) if text else None
     if not re.fullmatch(r"[^\s\"\\()\-][^\s\"\\()]*", query) or query in ("or", "OR"):
         return None
+    if len(query) >= 3 and query.startswith("/") and query.endswith("/"):
+        return None  # code-search reads this as a regex, not text
     if ":" in query and query.split(":", 1)[0] in FILTERS:
         return None  # a filter like lang:go, not text
     return query, case_sensitive

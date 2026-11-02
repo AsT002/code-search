@@ -106,6 +106,38 @@ TEST(RegexSearch, PatternsNamingNonAscii) {
               std::vector<std::string>{"a.txt"});
 }
 
+TEST(RegexSearch, LongSForS) {
+    // Without case, RE2 matches LONG S (U+017F) for s.
+    EXPECT_EQ(regexFinds("same",
+                         "\xC5\xBF"
+                         "ame",
+                         false),
+              std::vector<std::string>{"a.txt"});
+}
+
+TEST(RegexSearch, CaseFlagsInsideThePattern) {
+    // case:yes, but (?i) turns folding on, so KELVIN SIGN matches k again.
+    EXPECT_EQ(regexFinds("(?i)key",
+                         "\xE2\x84\xAA"
+                         "ey",
+                         true),
+              std::vector<std::string>{"a.txt"});
+    EXPECT_EQ(regexFinds("x(?i:key)",
+                         "x\xE2\x84\xAA"
+                         "ey",
+                         true),
+              std::vector<std::string>{"a.txt"});
+}
+
+TEST(RegexSearch, OctalEscapesNamingNonAscii) {
+    // \577 is octal for U+017F, LONG S, which the prefilter lowercases to s.
+    EXPECT_EQ(regexFinds("\\577ame",
+                         "\xC5\xBF"
+                         "ame",
+                         true),
+              std::vector<std::string>{"a.txt"});
+}
+
 TEST(RegexSearch, TheIndexStillNarrowsAsciiRegexes) {
     const TrigramQuery plan =
         planCandidates(regex("foo|bar"), SearchOptions{.caseSensitive = true});

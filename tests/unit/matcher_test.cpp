@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -151,6 +153,48 @@ TEST(RegexMatcher, CaseFoldingIsRe2s) {
     // Unlike plain text search, RE2 also folds non-ASCII letters.
     EXPECT_EQ(regexSpans("\xC3\xA9", "\xC3\x89", false), (std::vector<Span>{{0, 2}}));
     EXPECT_EQ(regexSpans("k", "\xE2\x84\xAA", false), (std::vector<Span>{{0, 3}}));  // KELVIN SIGN
+}
+
+// \Q quotes the rest of the pattern. A group around the pattern would
+// have its ) quoted too, and the regex would be broken.
+TEST(RegexMatcher, QuoteToTheEnd) {
+    EXPECT_EQ(regexSpans("\\Qa.b", "axb a.b"), (std::vector<Span>{{4, 7}}));
+    EXPECT_EQ(regexSpans("x|\\Qy)", "y) x"), (std::vector<Span>{{0, 2}, {3, 4}}));
+}
+
+// A match never takes in a line ending, like grep: \n never matches, and
+// [^x]+ stops at the end of each line.
+TEST(RegexMatcher, MatchesStayWithinALine) {
+    EXPECT_TRUE(regexSpans("a\\nb", "a\nb").empty());
+    EXPECT_FALSE(RegexMatcher("a\\nb", true).foundIn("a\nb"));
+    EXPECT_EQ(regexSpans("[^x]+", "ab\ncd"), (std::vector<Span>{{0, 2}, {3, 5}}));
+}
+
+// Finding every match could take time growing with the square of a line's
+// length: for /a*z|/ on a line of a's, each search looks to the line's end
+// for a z. The work is capped, so this takes milliseconds, not minutes.
+TEST(RegexMatcher, FindingAllMatchesStaysFast) {
+    const std::string line(200000, 'a');
+    for (const std::string_view pattern : {"a*z|", "a*z|a"}) {
+        SCOPED_TRACE(pattern);
+        const auto start = std::chrono::steady_clock::now();
+        std::size_t found = 0;
+        RegexMatcher(pattern, true).findAll(line, [&](Span) {
+            ++found;
+            return true;
+        });
+        const auto seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        EXPECT_LT(seconds, 20.0);
+    }
+    // Lines of up to 1,024 bytes are never cut short, however dense the
+    // matches. On a longer line, very dense matches can be.
+    EXPECT_EQ(regexSpans("e", std::string(1024, 'e')).size(), 1024U);
+    std::string lines;
+    for (int i = 0; i < 50; ++i) {
+        lines += std::string(1000, 'e') + "\n";
+    }
+    EXPECT_EQ(regexSpans("e", lines).size(), 50000U);
 }
 
 TEST(RegexMatcher, BadPatternsAreRejected) {
