@@ -17,6 +17,13 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// Thrown when registry.json was written by a newer code-search, with a
+// registry version this one can't read. The file is fine; this program is old.
+class NewerRegistryError : public RegistryError {
+public:
+    using RegistryError::RegistryError;
+};
+
 enum class RepoSource {
     Local,   // a repo on this machine; we never change or delete it
     GitHub,  // a clone we own, in the workspace's repos/ folder

@@ -6,9 +6,15 @@
 namespace codesearch {
 
 std::vector<std::string> gitArgs(const std::filesystem::path& dir,
-                                 const std::vector<std::string>& args) {
-    std::vector<std::string> result = {"-C", dir.string()};
+                                 const std::vector<std::string>& args, FindRepo find) {
+    std::vector<std::string> result;
     result.reserve(2 + args.size());
+    if (find == FindRepo::BareRepo) {
+        result.push_back("--git-dir=" + dir.string());
+    } else {
+        result.push_back("-C");
+        result.push_back(dir.string());
+    }
     for (const std::string& arg : args) {
         result.push_back(arg);
     }
@@ -56,6 +62,26 @@ std::vector<std::string> gitEnv(const std::vector<std::string>& extraEnv) {
 
 namespace {
 
+// The extra environment for Git commands that use the network.
+// GIT_TERMINAL_PROMPT=0: never ask for a password in the terminal. Git asks
+// a GIT_ASKPASS, core.askPass or SSH_ASKPASS program before it checks that,
+// and editors like VS Code set GIT_ASKPASS, so an empty GIT_ASKPASS turns
+// those off too, and GCM_INTERACTIVE=never stops Git Credential Manager's
+// window. A private or missing repo then fails instead of waiting.
+// GIT_HTTP_LOW_SPEED_*: stop if fewer than 1,000 bytes a second arrive for
+// 60 seconds, so a stalled connection fails instead of holding the
+// workspace lock forever.
+std::vector<std::string> networkEnv() {
+    return {
+        "GIT_TERMINAL_PROMPT=0",
+        "GIT_ASKPASS=",
+        "SSH_ASKPASS=",
+        "GCM_INTERACTIVE=never",
+        "GIT_HTTP_LOW_SPEED_LIMIT=1000",
+        "GIT_HTTP_LOW_SPEED_TIME=60",
+    };
+}
+
 GitResult runGitProcess(const std::vector<std::string>& args,
                         const std::vector<std::string>& extraEnv = {}) {
     try {
@@ -74,7 +100,8 @@ std::string withoutFinalNewline(std::string text) {
     return text;
 }
 
-// Git's error messages, without blank lines and its "Cloning into ..." progress line.
+}  // namespace
+
 std::string errorLines(const std::string& err) {
     std::string message;
     std::size_t start = 0;
@@ -93,16 +120,23 @@ std::string errorLines(const std::string& err) {
     return message;
 }
 
-}  // namespace
+std::string notARepoReason(const std::string& err) {
+    const std::string lines = errorLines(err);
+    if (lines.empty() || lines.find("not a git repository") != std::string::npos) {
+        return "";
+    }
+    return ":\n" + lines;
+}
 
-GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string>& args) {
-    return runGitProcess(gitArgs(dir, args));
+GitResult runGit(const std::filesystem::path& dir, const std::vector<std::string>& args,
+                 FindRepo find) {
+    return runGitProcess(gitArgs(dir, args, find));
 }
 
 std::filesystem::path repoTopFolder(const std::filesystem::path& dir) {
     const GitResult bare = runGit(dir, {"rev-parse", "--is-bare-repository"});
     if (bare.exitCode != 0) {
-        throw GitError("not a Git repository: " + dir.string());
+        throw GitError("not a Git repository: " + dir.string() + notARepoReason(bare.err));
     }
     // A bare repo has no work tree, so its top folder is the repo folder itself.
     const bool isBare = withoutFinalNewline(bare.out) == "true";
@@ -125,7 +159,7 @@ void cloneShallow(const std::string& url, const std::filesystem::path& dest) {
     const std::vector<std::string> args = {
         "clone", "--bare", "--depth", "1", "--single-branch", "--no-tags", "--", url, dest.string(),
     };
-    const GitResult result = runGitProcess(args, {"GIT_TERMINAL_PROMPT=0"});
+    const GitResult result = runGitProcess(args, networkEnv());
     if (result.exitCode != 0) {
         throw GitError("could not clone " + url + ":\n" + errorLines(result.err));
     }
@@ -149,9 +183,8 @@ void fetchLatest(const std::filesystem::path& clone) {
         throw GitError("refusing to update " + clone.string() +
                        ": Git would write to another folder");
     }
-    const GitResult fetched =
-        runGitProcess({gitDir, "fetch", "--quiet", "--depth", "1", "--no-tags", "origin", "HEAD"},
-                      {"GIT_TERMINAL_PROMPT=0"});
+    const GitResult fetched = runGitProcess(
+        {gitDir, "fetch", "--quiet", "--depth", "1", "--no-tags", "origin", "HEAD"}, networkEnv());
     if (fetched.exitCode != 0) {
         throw GitError("could not fetch into " + clone.string() + ":\n" + errorLines(fetched.err));
     }

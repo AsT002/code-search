@@ -143,8 +143,9 @@ Status: done. Notes:
   each publishing step, then check the registry and every index it names, and
   that the next cleanup leaves only what the registry uses.
 - GitHub tests use a fake cloner that copies a local repo, so they don't need
-  the network. `git clone` runs with `GIT_TERMINAL_PROMPT=0`, so a private or
-  missing repo fails instead of asking for a password.
+  the network. `git clone` runs with `GIT_TERMINAL_PROMPT=0` and an empty
+  `GIT_ASKPASS`, so a private or missing repo fails instead of asking for a
+  password, and stops if the connection stalls for a minute.
 - When a search finds that an index file was deleted after it read the
   registry, it reads the registry again and retries once. There's no test that
   forces this race yet.
@@ -389,6 +390,11 @@ Status: done. Results in [BENCHMARKS.md](BENCHMARKS.md). Notes:
   (now Knuth-Morris-Pratt), Git replacement objects, a nested repo losing its
   `.git`, out of memory on the thread reading Git's errors, Ctrl-C while
   `--path` indexes, unescaped `verify` messages, and `--json` usage errors.
+- A fourth review found that the time limit used the wall clock, so a busy
+  machine or a paused process could use it up, and that `findAll` then
+  stopped, dropping every matching line after that point from the results.
+  Now the limit counts CPU time, and after it each line that's left still
+  gets its first match.
 
 - `RegexMatcher` with RE2, and a brute-force RE2 reference with the same options.
 - v1: a regex becomes `All`, and RE2 checks every file the rest of the query

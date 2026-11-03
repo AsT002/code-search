@@ -3,9 +3,12 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "codesearch/search/evaluator.hpp"
@@ -294,28 +297,70 @@ TEST(RegexMatcher, FindingAllMatchesStaysFast) {
     }
 }
 
+// The CPU time this thread has used, in seconds, as findAll's limit counts it.
+double threadSeconds() {
+    timespec now{};
+    ::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return static_cast<double>(now.tv_sec) + (static_cast<double>(now.tv_nsec) / 1e9);
+}
+
 // Each search for /a.*a.{1000}c|a/ in random a's and b's reads the rest of
 // the line, slowly. findAll checks its limit (101.5 ms for 1,500 bytes)
-// before each search, so it runs past the limit by one search at most,
-// not by many.
+// before each search, so it runs past the limit by one search at most.
+// Then it looks once more for the first match in the rest of the line.
 TEST(RegexMatcher, SlowSearchesStopAtTheTimeLimit) {
     std::mt19937 random(1);  // NOLINT(cert-msc32-c,cert-msc51-cpp,bugprone-random-generator-seed)
     std::string text;
     for (int i = 0; i < 1500; ++i) {
         text += (random() % 2 == 0) ? 'a' : 'b';
     }
-    const auto start = std::chrono::steady_clock::now();
-    double firstSearch = 0;  // seconds until the first match was found
+    const double start = threadSeconds();
+    double firstSearch = 0;  // CPU seconds until the first match was found
     RegexMatcher("a.*a.{1000}c|a", true).findAll(text, [&](Span) {
         if (firstSearch == 0) {
-            firstSearch =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            firstSearch = threadSeconds() - start;
         }
         return true;
     });
-    const double seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    EXPECT_LT(seconds, 0.1015 + (2 * firstSearch));
+    EXPECT_LT(threadSeconds() - start, 0.1015 + (3 * firstSearch));
+}
+
+// After the time limit, each line that's left still gets its first match,
+// so no matching line goes missing from the results. /a*z|a/ reads to the
+// line's end on each search, so finding every match in these lines takes
+// time growing with the square of their length.
+TEST(RegexMatcher, LinesAfterTheTimeLimitKeepAMatch) {
+    std::string text;
+    for (int i = 0; i < 50; ++i) {
+        text += std::string(20000, 'a') + "\n";
+    }
+    std::set<std::size_t> lines;  // the lines with a match, by the offset they start at
+    std::size_t matches = 0;
+    RegexMatcher("a*z|a", true).findAll(text, [&](Span span) {
+        lines.insert(text.rfind('\n', span.begin) + 1);  // npos + 1 is 0, the first line
+        ++matches;
+        return true;
+    });
+    EXPECT_EQ(lines.size(), 50U);
+    EXPECT_LT(matches, 50U * 20000U);  // the limit was reached
+}
+
+// The limit counts CPU time, so time the process spends paused or waiting
+// for a CPU doesn't use it up. A sleep stands in for that here.
+TEST(RegexMatcher, PausesDontUseUpTheTimeLimit) {
+    std::string text;
+    for (int i = 0; i < 20000; ++i) {
+        text += "ab\n";
+    }
+    std::size_t found = 0;
+    RegexMatcher("ab", true).findAll(text, [&](Span) {
+        if (found == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+        ++found;
+        return true;
+    });
+    EXPECT_EQ(found, 20000U);
 }
 
 // Ordinary regexes highlight every match, however long the line, like

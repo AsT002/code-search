@@ -129,6 +129,8 @@ TEST(Cli, BadArgumentsPrintUsage) {
         {"add", ".", "--name", "a", "--name", "b"},  // two names
         {"add", "--bogus"},
         {"list", "x"},
+        {"update", "--rebuild"},  // no name
+        {"update", "--rebuild", "--rebuild"},
         {"remove"},
         {"remove", "a", "b"},
         {"verify"},
@@ -148,6 +150,7 @@ TEST(Cli, BadArgumentsPrintUsage) {
 TEST(Cli, BadArgumentsWithJsonGiveJson) {
     for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
              {"search", "--json", "-C", "abc", "foo"},
+             {"search", "-C", "--json", "foo"},  // not a number, so --json is --json
              {"search", "--json", "-x"},
              {"search", "a", "--json", "b"},
              // The "--" is --path's value, not the end of the options.
@@ -579,6 +582,9 @@ TEST(CliRepos, UpdatePicksUpNewCommits) {
     result = codeSearch({"update", "demo", "--rebuild"}, home.dir());
     EXPECT_EQ(result.exitCode, 0) << result.err;
     EXPECT_EQ(result.out, "updated demo (asked to rebuild)\n");
+    result = codeSearch({"update", "--rebuild", "demo"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_EQ(result.out, "updated demo (asked to rebuild)\n");
 
     result = codeSearch({"update", "nope"}, home.dir());
     EXPECT_EQ(result.exitCode, 2);
@@ -641,7 +647,7 @@ TEST(CliRepos, VerifyChecksTheIndex) {
 // Another repo's index copied over demo's opens fine and passes the full
 // check, but it isn't demo's index. Search and verify must say so, not
 // show the other repo's files as demo's.
-TEST(CliRepos, AnIndexThatDoesntMatchTheRegistryIsAnError) {
+TEST(CliRepos, AnIndexThatDoesntMatchTheRegistryIsSkipped) {
     TempRepo demo;
     fillRepo(demo);
     TempRepo other;
@@ -659,13 +665,26 @@ TEST(CliRepos, AnIndexThatDoesntMatchTheRegistryIsAnError) {
     ProcessResult result = codeSearch({"verify", "demo"}, home.dir());
     EXPECT_EQ(result.exitCode, 1);
     EXPECT_TRUE(contains(result.err, "the index file doesn't match the registry")) << result.err;
+    // The other repo is still searched; demo is skipped with a warning.
     result = codeSearch({"search", "target"}, home.dir());
-    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_EQ(result.exitCode, 0) << result.err;
     EXPECT_TRUE(contains(result.err,
-                         "demo: the index file doesn't match the registry. Rebuild "
-                         "it with: code-search update demo --rebuild"))
+                         "code-search: skipped demo: the index file doesn't match the registry. "
+                         "Rebuild it with: code-search update demo --rebuild"))
         << result.err;
-    EXPECT_FALSE(contains(result.out, "demo:other.txt")) << result.out;
+    EXPECT_EQ(result.out, "other:other.txt:1:7:other target\n");
+    result = codeSearch({"search", "--json", "target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 0) << result.err;
+    EXPECT_TRUE(contains(result.out,
+                         "],\"skipped\":[{\"repo\":\"demo\",\"error\":\"demo: the "
+                         "index file doesn't match the registry"))
+        << result.out;
+    EXPECT_TRUE(result.out.ends_with("--rebuild\"}],\"status\":\"complete\"}\n")) << result.out;
+    // With only demo to search, there's nothing left: an error.
+    result = codeSearch({"search", "repo:demo target"}, home.dir());
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "demo: the index file doesn't match the registry"))
+        << result.err;
 
     result = codeSearch({"update", "demo"}, home.dir());
     EXPECT_TRUE(contains(result.out, "the index file doesn't match the registry")) << result.out;
@@ -797,6 +816,13 @@ TEST(CliRepos, DataGoesInHomeByDefault) {
                                             {"HOME=" + home.dir().string()});
     EXPECT_EQ(result.exitCode, 0) << result.err;
     EXPECT_TRUE(std::filesystem::exists(home.dir() / ".code-search" / "registry.json"));
+}
+
+// A relative CODE_SEARCH_HOME would mean a different workspace in each folder.
+TEST(CliRepos, RelativeHomeIsAnError) {
+    const ProcessResult result = codeSearch({"list"}, "relative/home");
+    EXPECT_EQ(result.exitCode, 2);
+    EXPECT_TRUE(contains(result.err, "CODE_SEARCH_HOME must be a full path")) << result.err;
 }
 
 TEST(CliErrors, Version) {

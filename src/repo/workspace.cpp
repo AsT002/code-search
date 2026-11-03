@@ -28,6 +28,12 @@ Workspace::Workspace(const std::filesystem::path& root) : root_(std::filesystem:
 std::filesystem::path Workspace::defaultRoot() {
     std::string custom = envValue("CODE_SEARCH_HOME");
     if (!custom.empty()) {
+        // A relative path would point somewhere else from each folder
+        // code-search runs in, so each would quietly get its own workspace.
+        if (!std::filesystem::path(custom).is_absolute()) {
+            throw std::runtime_error(
+                "CODE_SEARCH_HOME must be a full path, like /home/me/cs, not " + custom);
+        }
         return custom;
     }
     const std::string home = envValue("HOME");

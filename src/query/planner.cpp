@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
 #include "codesearch/index/trigram.hpp"
+#include "codesearch/search/regex_matcher.hpp"
 
 namespace codesearch {
 
@@ -340,19 +342,17 @@ TrigramQuery planRegex(const RegexNode& node, bool caseSensitive) {
     if (mayNameNonAscii(node.pattern)) {
         return {AllQuery{}};
     }
-    // Compiled the way RegexMatcher compiles it, so the tree fits what's run.
-    RE2::Options re2Options;
-    re2Options.set_case_sensitive(caseSensitive);
-    re2Options.set_never_nl(true);
-    re2Options.set_log_errors(false);
-    const RE2 compiled("(?m)" + node.pattern, re2Options);
-    // A flag in the pattern can fold case even under case:yes.
-    caseSensitive = caseSensitive && !hasCaseFlag(node.pattern);
-    if (!compiled.ok()) {
+    // Compiled by RegexMatcher itself, so the tree fits what's run.
+    std::optional<RegexMatcher> matcher;
+    try {
+        matcher.emplace(node.pattern, caseSensitive);
+    } catch (const std::invalid_argument&) {
         return {AllQuery{}};
     }
+    // A flag in the pattern can fold case even under case:yes.
+    caseSensitive = caseSensitive && !hasCaseFlag(node.pattern);
     // FromRE2 returns a new tree, or null; unique_ptr deletes it.
-    const std::unique_ptr<re2::Prefilter> tree(re2::Prefilter::FromRE2(&compiled));
+    const std::unique_ptr<re2::Prefilter> tree(re2::Prefilter::FromRE2(&matcher->compiled()));
     if (tree == nullptr) {
         return {AllQuery{}};
     }

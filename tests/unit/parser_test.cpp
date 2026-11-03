@@ -112,6 +112,12 @@ TEST(Parser, BadRegexesAreErrors) {
     expectError(R"(x /a\/(/ y)", R"(the regex /a\/(/ isn't valid)");
 }
 
+// The parser checks a regex with the memory the search gives it, so it
+// doesn't turn down one that RE2's smaller default can't hold.
+TEST(Parser, BigRegexesAreAccepted) {
+    EXPECT_EQ(parsed(R"(/\pL{1000}/)"), regex(R"(\pL{1000})"));
+}
+
 TEST(Parser, CaseIsAnOption) {
     ParsedQuery query = parseQuery("foo case:yes");
     EXPECT_EQ(query.root, literal("foo"));
@@ -131,6 +137,8 @@ TEST(Parser, Errors) {
     expectError("a or or b", "\"or\" needs something on both sides");
     expectError("()", "nothing inside ( )");
     expectError("(a", "a ( is missing its )");
+    expectError("foo (", "a ( is missing its )");
+    expectError("foo -(", "a ( is missing its )");
     expectError("a)", "a ) without a matching (");
     expectError("-)", "a ) without a matching (");
     expectError("\"abc", "missing its closing \"");

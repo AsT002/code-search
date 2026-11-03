@@ -221,7 +221,10 @@ AddResult RepoManager::add(const std::string& source, const std::string& name) {
             step("cloned");
         }
 
-        const GitRepo repo(repoDir);
+        // A clone we made is opened as exactly that folder (see FindRepo).
+        const FindRepo find =
+            resolved.kind == RepoSource::GitHub ? FindRepo::BareRepo : FindRepo::FromFolder;
+        const GitRepo repo(repoDir, find);
         const std::optional<ObjectId> commit = repo.resolveHead();
         if (!commit.has_value()) {
             throw std::runtime_error(source + " has no commits yet");
@@ -278,7 +281,9 @@ UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
                                      entry.name);
         }
 
-        const GitRepo repo(repoDir);
+        const FindRepo find =
+            entry.source == RepoSource::GitHub ? FindRepo::BareRepo : FindRepo::FromFolder;
+        const GitRepo repo(repoDir, find);
         const std::optional<ObjectId> commit = repo.resolveHead();
         if (!commit.has_value()) {
             throw std::runtime_error(entry.location + " has no commits");
@@ -391,38 +396,58 @@ std::unique_ptr<ShardReader> openIndex(const Workspace& workspace, const RepoEnt
     try {
         reader = std::make_unique<ShardReader>(path);
     } catch (const IndexFileError& error) {
-        throw IndexFileError(repo.name + ": " + error.what() + rebuildHint(repo.name));
-    } catch (const std::runtime_error&) {
+        throw RepoIndexError(repo.name, error.what() + rebuildHint(repo.name));
+    } catch (const std::runtime_error& error) {
         if (mayBeGone && !std::filesystem::exists(path)) {
             return nullptr;
         }
-        throw;
+        throw std::runtime_error(repo.name + ": " + error.what());
     }
     if (!matchesRegistry(*reader, repo.index)) {
-        throw IndexFileError(repo.name + ": the index file doesn't match the registry" +
-                             rebuildHint(repo.name));
+        throw RepoIndexError(repo.name,
+                             "the index file doesn't match the registry" + rebuildHint(repo.name));
     }
     return reader;
 }
 
+// Throws if `query` names a repo (repo:x) that isn't added.
+void checkReposExist(const Registry& registry, const QueryNode& query) {
+    for (const std::string& name : repoNamesIn(query)) {
+        if (registry.find(name) == nullptr) {
+            throw std::runtime_error("no repo named " + name);
+        }
+    }
+}
+
 }  // namespace
 
-std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query) {
+std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query,
+                                std::vector<RepoIndexError>* damaged) {
+    // An index file goes away when an update replaces it after we read the
+    // registry. Then the registry is read again, a few times, since more
+    // updates can finish in between.
+    constexpr int kAttempts = 5;
     for (int attempt = 1;; ++attempt) {
         const Registry registry = loadRegistry(workspace);
-        for (const std::string& name : repoNamesIn(query)) {
-            if (registry.find(name) == nullptr) {
-                throw std::runtime_error("no repo named " + name);
-            }
-        }
+        checkReposExist(registry, query);
 
         std::vector<OpenRepo> opened;
+        std::vector<RepoIndexError> damagedHere;  // this attempt's, kept if it's the last
         bool fileWentAway = false;
         for (const RepoEntry& repo : registry.repos) {
             if (resolveRepo(query, repo.name) == constant(false)) {
                 continue;  // nothing in this repo can match
             }
-            std::unique_ptr<ShardReader> reader = openIndex(workspace, repo, attempt == 1);
+            std::unique_ptr<ShardReader> reader;
+            try {
+                reader = openIndex(workspace, repo, attempt < kAttempts);
+            } catch (const RepoIndexError& error) {
+                if (damaged == nullptr) {
+                    throw;
+                }
+                damagedHere.push_back(error);
+                continue;  // leave this repo out
+            }
             if (reader == nullptr) {
                 fileWentAway = true;
                 break;
@@ -430,6 +455,9 @@ std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& que
             opened.push_back(OpenRepo{.name = repo.name, .index = std::move(reader)});
         }
         if (!fileWentAway) {
+            if (damaged != nullptr) {
+                damaged->insert(damaged->end(), damagedHere.begin(), damagedHere.end());
+            }
             return opened;
         }
     }

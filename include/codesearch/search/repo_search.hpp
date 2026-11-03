@@ -71,14 +71,24 @@ struct SearchRequest {
     const std::atomic<bool>* cancelled = nullptr;  // checked before each file
     // Threads to check files on. nullptr checks them all on this thread.
     ThreadPool* pool = nullptr;
+    // About the most bytes of results the pool may hold that the caller
+    // hasn't taken yet (see ParallelSearch). Tests make it small, so they
+    // can go past it with little data.
+    std::size_t maxHeldBytes = std::size_t{32} << 20U;  // 32 MiB
+    // If set, a named repo whose index turns out to be damaged is skipped:
+    // this is called with the error, the repo's results stop there, and the
+    // search goes on with the next repo. Called on the searching thread, in
+    // the order results come out. If not set, the error is thrown.
+    std::function<void(const RepoIndexError& error)> onDamaged;
 };
 
 // Searches each target in turn and calls onFile for each matching file:
 // repo by repo, in the order given, then by doc ID. Each repo gets the query
 // with its repo: filters resolved, and is skipped if that makes it false.
 // Stops as soon as the limit is passed, so memory stays small. If a
-// target's index turns out to be damaged, throws RepoIndexError naming it
-// (or the IndexFileError as it is, if the name is "").
+// target's index turns out to be damaged, calls request.onDamaged and skips
+// the rest of that repo, or without onDamaged throws RepoIndexError naming
+// it (or the IndexFileError as it is, if the name is "").
 SearchStatus searchRepos(std::span<const SearchTarget> targets, const SearchRequest& request,
                          const std::function<void(const ResultFile& file)>& onFile);
 

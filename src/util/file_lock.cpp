@@ -31,7 +31,9 @@ int lockRetrying(int fd, int operation) {
 }  // namespace
 
 FileLock::FileLock(const std::filesystem::path& path, const std::function<void()>& onWait) {
-    const int flags = O_RDWR | O_CREAT | O_CLOEXEC;
+    // O_NOFOLLOW: if the lock file is a symlink, fail instead of creating
+    // or locking whatever it points to.
+    const int flags = O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW;
     fd_ = ::open(path.c_str(), flags, 0600);  // NOLINT(cppcoreguidelines-pro-type-vararg)
     if (fd_ < 0) {
         fail(path, errno);
@@ -46,7 +48,14 @@ FileLock::FileLock(const std::filesystem::path& path, const std::function<void()
         fail(path, error);
     }
     if (onWait) {
-        onWait();
+        try {
+            onWait();
+        } catch (...) {
+            // The constructor didn't finish, so the destructor won't run
+            // to close the file.
+            ::close(fd_);
+            throw;
+        }
     }
     if (lockRetrying(fd_, LOCK_EX) != 0) {
         const int waitError = errno;

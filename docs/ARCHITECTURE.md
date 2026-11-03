@@ -203,8 +203,9 @@ Each index stores two values that describe the rules used to build it:
 
 - `policy_version` goes up when we change which files get indexed or how their
   content is read. Version 2 ignores Git's replacement objects.
-- `config_fingerprint` is a hash of the actual settings (size limit, exclude
-  patterns, overrides, codecs, normalization). If a user changes a setting, the
+- `config_fingerprint` is a hash of the actual settings (for now the size
+  limit and exclude patterns; overrides, codecs and normalization will join
+  them when they become settings). If a user changes a setting, the
   fingerprint changes and the repo gets rebuilt.
 
 `ls-tree` lists every file in the commit, including committed files that match
@@ -234,7 +235,8 @@ Each index stores two values that describe the rules used to build it:
 └── tmp/                     builds in progress
 ```
 
-The folder is `$CODE_SEARCH_HOME` if that's set, otherwise `~/.code-search`.
+The folder is `$CODE_SEARCH_HOME` if that's set (it must be a full path),
+otherwise `~/.code-search`.
 It must be missing, empty, or already a workspace (it has
 `code-search-workspace`, or `registry.json` for workspaces made before the
 marker). Otherwise `add`, `update` and `remove` refuse to start, so pointing
@@ -471,7 +473,7 @@ code-search update <name> [--rebuild]
 
 code-search search "<query>"
   parse → plan
-  → for each selected repo (a limited number at a time):
+  → open every selected repo's index, then for each one:
        plan for this repo → find candidates → check each one → collect matches
   → merge in a fixed order, apply limits → print
 ```
@@ -496,7 +498,7 @@ is a breaking change.
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
 | `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` and `\C+` stop at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
 | What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message |
-| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. For a pathological regex and file, highlighting can stop partway through the file after a time limit (see Regex below) |
+| Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. For a pathological regex and file, after a time limit only the first match in each line is highlighted (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
 | Case | Case-insensitive by default. `case:yes` or `case:no` anywhere in the query applies to all of it, and wins over `--case-sensitive`. Only ASCII letters are folded, without using the system locale (no `tolower`) |
@@ -553,10 +555,18 @@ result never has to sit in memory:
 ```
 
 - `status` is `complete`, `truncated` (a limit cut it), `cancelled`, or
-  `error`. Errors before the search starts, like a bad query or a damaged
-  index file, give a document with no files and `status` `error`. With `error`, an `error` field holds the message, like a damaged
-  index, and the files before it are still there. The program also prints
-  the message to stderr and exits with 2. (`error` was added after M6.)
+  `error`. Errors before the search starts, like a bad query, give a
+  document with no files and `status` `error`. With `error`, an `error`
+  field holds the message, and the files before it are still there. The
+  program also prints the message to stderr and exits with 2. (`error` was
+  added after M6.)
+- A repo whose index turns out to be damaged, when it's opened or partway
+  through the search, is skipped: its results stop there and the other
+  repos are still searched. Each one goes in `skipped`, after `files`, as
+  `{"repo":"demo","error":"demo: ... Rebuild it with: ..."}`, and the same
+  message goes to stderr. The exit code still says whether anything was
+  found. If the damaged repo is the last one left to search, it's an error
+  instead, as above.
 - `lines` holds matching lines and context lines; context lines have no
   matches. It's empty with `-l` and for files with nothing to highlight.
 - `start` and `end` are byte offsets inside the line's original bytes. A
@@ -614,10 +624,12 @@ Memory stays bounded however slowly the results are read:
   far (16 files, down to 1), so the threads aren't all partway through big
   files when the limit is reached. The first chunk on each thread has 1
   file, to find out.
-- With a limit, a file's result never has more lines than the limit.
+- With a limit, a file's result never has more matching lines than the
+  limit. Context lines come on top.
 
 Damage found in a repo, and cancelling, show up when the results get there,
-as with one thread. On a machine with one core, or if the threads can't be
+as with one thread. A skipped repo's chunks still running are dropped as
+they come up, and no more of it are handed out. On a machine with one core, or if the threads can't be
 started, the search runs on the calling thread.
 
 ### Why we keep the whole query
@@ -711,10 +723,17 @@ by one byte instead of one character.
 Each search for a match is linear, but finding every match on a line can
 take time growing with the square of the line's length: for `/a*z|a/` on a
 line of `a`s, each search looks to the line's end for a `z`. RE2 can't say
-how much work a search did, so `findAll` stops after a time limit: 100 ms
-plus 1 microsecond per byte of the file. The file still matches; the rest of
-its matches aren't highlighted. The clock is read before every search, since
+how much work a search did, so `findAll` has a time limit: 100 ms plus 1
+microsecond per byte of the file. After it, `findAll` looks for only the
+first match in each line that's left, which is linear again. Every matching
+line is still in the results; only its later matches aren't highlighted. (A
+line where the regex first matches empty, then matches text further on, can
+be missed after the limit, since finding the later match is what's slow.)
+The limit counts the thread's CPU time, so a paused process or a busy
+machine doesn't use it up. The clock is read before every search, since
 one search can take a second; it runs past the limit by one search at most.
+The wall clock is read first, since it's cheaper: CPU time can't pass the
+limit before it does.
 A release build finds even a match on every byte in 0.04 microseconds per
 byte, so only pathological cases reach it. (An
 earlier limit counted work per line, which cut ordinary long lines, like

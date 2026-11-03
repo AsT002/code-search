@@ -35,14 +35,21 @@ public:
     explicit JsonResultWriter(std::ostream& out);
 
     void file(const ResultFile& file);
+    // A repo left out of the search because its index is damaged. Listed
+    // in "skipped", after the files, when the document ends.
+    void skipped(std::string_view repo, std::string_view message);
     void finish(SearchStatus status);
     // Ends the document with "status":"error" and the message. Bytes of the
     // message that aren't valid UTF-8 become U+FFFD.
     void fail(std::string_view message);
 
 private:
+    // Ends the "files" list, and writes "skipped" if any repo was.
+    void endFiles();
+
     std::ostream* out_;  // a pointer, not a reference, so the class can be assigned
     bool first_ = true;
+    std::string skipped_;  // the "skipped" entries so far, as JSON
 };
 
 }  // namespace codesearch

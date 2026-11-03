@@ -416,15 +416,20 @@ TEST(SearchReposOnAPool, LimitBoundsWhatIsKept) {
     EXPECT_LT(gPeak - before, std::size_t{4} << 20U) << "most bytes live at once";
 }
 
+// The tests of what the pool holds use an eighth of the usual 32 MiB, and
+// files an eighth as big, so they hold the same number of files with an
+// eighth of the work: sanitizer builds are slow.
+constexpr std::size_t kTestHeldBytes = std::size_t{4} << 20U;
+
 // Without a limit, results waiting for the caller are kept to about
-// 32 MiB. Before, the pool took on 256 files at once and held all their
-// results: here about 200 MiB, while one thread needs a few. The caller
-// is slow to take the first result, like a terminal printing a lot, so the
-// pool gets ahead as far as it's allowed to.
+// maxHeldBytes. Before, the pool took on 256 files at once and held all
+// their results: here about 10 MiB, while one thread needs a few. The
+// caller is slow to take the first result, like a terminal printing a lot,
+// so the pool gets ahead as far as it's allowed to.
 TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
     IndexBuilder builder;
     std::string content;
-    for (int n = 0; n < 1024; ++n) {
+    for (int n = 0; n < 256; ++n) {
         content += std::string(31, 'e') + "\n";
     }
     for (int i = 0; i < 128; ++i) {
@@ -436,6 +441,7 @@ TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
     SearchRequest request;
     request.query = literal("e");
     request.pool = &pool;
+    request.maxHeldBytes = kTestHeldBytes;
 
     std::size_t files = 0;
     const std::size_t before = gLive;
@@ -449,24 +455,25 @@ TEST(SearchReposOnAPool, NoLimitStillBoundsWhatIsHeld) {
     gCounting = false;
     EXPECT_EQ(status, SearchStatus::Complete);
     EXPECT_EQ(files, 128U);
-    EXPECT_LT(gPeak - before, std::size_t{64} << 20U) << "most bytes live at once";
+    // Without maxHeldBytes, about 10 MiB.
+    EXPECT_LT(gPeak - before, std::size_t{6} << 20U) << "most bytes live at once";
 }
 
 // Results sizes measured so far can mislead: here the first 64 files have
 // no matches, so the files after them looked cheap, and the pool took on
-// over a hundred files where every line matches (about 65 MiB). What's held
-// must be limited by the bytes actually made, not by a guess.
+// over a hundred files where every line matches (about 8 MiB here). What's
+// held must be limited by the bytes actually made, not by a guess.
 TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
     IndexBuilder builder;
-    const std::string none(std::size_t{32} << 10U, 'x');
+    const std::string none(std::size_t{4} << 10U, 'x');
     std::string dense;
-    for (int n = 0; n < 1024; ++n) {
+    for (int n = 0; n < 128; ++n) {
         dense += std::string(31, 'e') + "\n";
     }
     for (int i = 0; i < 64; ++i) {
         builder.add("a" + std::to_string(i), none);
     }
-    // 128 files of about 0.6 MB of results each: far more than the limit,
+    // 128 files of about 75 KB of results each: far more than the limit,
     // and few enough to stay quick under ThreadSanitizer.
     for (int i = 0; i < 128; ++i) {
         builder.add("b" + std::to_string(i), dense);
@@ -477,6 +484,7 @@ TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
     SearchRequest request;
     request.query = literal("e");
     request.pool = &pool;
+    request.maxHeldBytes = kTestHeldBytes;
 
     std::vector<std::string> paths;
     SearchStatus status = SearchStatus::Cancelled;
@@ -501,9 +509,9 @@ TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
         expected.push_back("b" + std::to_string(i));
     }
     EXPECT_EQ(paths, expected);  // all of them, in order
-    // 32 MiB of results waiting, plus what 4 threads hold for the file each
+    // 4 MiB of results waiting, plus what 4 threads hold for the file each
     // is working on.
-    EXPECT_LT(gPeak - before, std::size_t{56} << 20U) << "most bytes live at once";
+    EXPECT_LT(gPeak - before, std::size_t{7} << 20U) << "most bytes live at once";
 }
 
 // The chunk the caller waits for must check a file even when chunks after
@@ -512,7 +520,7 @@ TEST(SearchReposOnAPool, HeldResultsStayBoundedWhenFilesChange) {
 // early chunk while the later chunks fill up the limit.
 TEST(SearchReposOnAPool, KeepsMovingWhenLaterChunksHoldTheLimit) {
     std::string dense;
-    for (int n = 0; n < 2048; ++n) {
+    for (int n = 0; n < 256; ++n) {
         dense += std::string(31, 'e') + "\n";
     }
     IndexBuilder builder;
@@ -540,6 +548,7 @@ TEST(SearchReposOnAPool, KeepsMovingWhenLaterChunksHoldTheLimit) {
     SearchRequest request;
     request.query = literal("e");
     request.pool = &pool;
+    request.maxHeldBytes = kTestHeldBytes;
     std::size_t files = 0;
     SearchStatus status = SearchStatus::Cancelled;
     testing::failIfItHangs([&] {
@@ -828,6 +837,69 @@ TEST(SearchReposOnAPool, DamageComesInOrder) {
         EXPECT_EQ(error.repo(), "bad");
     }
     EXPECT_EQ(before, 40U);
+}
+
+// With onDamaged, a damaged repo is skipped: its results stop where the
+// damage is, and the repos after it are still searched, in order. Damage
+// in a file's content and in a posting list both count.
+TEST(SearchRepos, OnDamagedSkipsTheRepo) {
+    class BrokenAtTwo : public CountingIndex {
+    public:
+        using CountingIndex::CountingIndex;
+        void withContent(DocId doc,
+                         const std::function<void(std::string_view)>& fn) const override {
+            if (doc == 2) {
+                throw IndexFileError("index file is damaged: test");
+            }
+            CountingIndex::withContent(doc, fn);
+        }
+    };
+    class BrokenPostings : public CountingIndex {
+    public:
+        using CountingIndex::CountingIndex;
+        std::optional<PostingCursor> postings(Trigram /*trigram*/) const override {
+            throw IndexFileError("index file is damaged: test");
+        }
+    };
+    const MemoryIndex index = manyFiles(40);
+    const BrokenAtTwo brokenContent(index);
+    const BrokenPostings brokenPostings(index);
+    const std::vector<SearchTarget> targets = {
+        {.name = "a", .index = &index},
+        {.name = "b", .index = &brokenContent},
+        {.name = "c", .index = &brokenPostings},
+        {.name = "d", .index = &index},
+    };
+    ThreadPool pool(4);
+    for (ThreadPool* threads : {static_cast<ThreadPool*>(nullptr), &pool}) {
+        SCOPED_TRACE(threads == nullptr ? "one thread" : "pool");
+        SearchRequest request;
+        request.query = literal("needle");
+        request.pool = threads;
+        std::vector<std::string> events;  // results and skips, in the order they came
+        request.onDamaged = [&](const RepoIndexError& error) {
+            events.push_back(std::string("skipped ") + error.what());
+        };
+        const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
+            if (file.repo == "a" || file.repo == "d") {
+                events.push_back(file.repo);  // one entry per repo is enough
+                if (events.size() >= 2 && events[events.size() - 2] == file.repo) {
+                    events.pop_back();
+                }
+            } else {
+                events.push_back(file.repo + ":" + file.path);
+            }
+        });
+        EXPECT_EQ(status, SearchStatus::Complete);
+        EXPECT_EQ(events, (std::vector<std::string>{
+                              "a",
+                              "b:f1000.go",
+                              "b:f1001.go",
+                              "skipped b: index file is damaged: test",
+                              "skipped c: index file is damaged: test",
+                              "d",
+                          }));
+    }
 }
 
 }  // namespace

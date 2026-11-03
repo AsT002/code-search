@@ -95,6 +95,21 @@ TEST(Registry, DamagedFileNamesTheFile) {
     }
 }
 
+// A newer program's registry isn't damaged, so the message doesn't say to
+// remove it.
+TEST(Registry, NewerVersionSaysToUpgrade) {
+    const TempDir dir;
+    writeFile(dir.file("registry.json"), R"({"version": 2, "repos": []})");
+    try {
+        JsonRegistryStore(dir.file("registry.json")).load();
+        FAIL() << "expected an error";
+    } catch (const NewerRegistryError& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("written by a newer code-search"), std::string::npos) << message;
+        EXPECT_EQ(message.find("damaged"), std::string::npos) << message;
+    }
+}
+
 // Replaces the first `from` in the sample registry's JSON with `to`.
 std::string sampleWith(const std::string& from, const std::string& to) {
     std::string json = registryToJson(sampleRegistry());

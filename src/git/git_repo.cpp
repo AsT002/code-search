@@ -52,8 +52,8 @@ ObjectId parseId(std::string_view hex) {
     return id.value();
 }
 
-GitResult runOrThrow(const std::filesystem::path& dir, const std::vector<std::string>& args) {
-    GitResult result = runGit(dir, args);
+// `result`, or a GitError if the Git run with `args` failed.
+GitResult okOrThrow(GitResult result, const std::vector<std::string>& args) {
     if (result.exitCode != 0) {
         throw GitError("git " + args.front() + " failed: " + std::string(trimNewline(result.err)));
     }
@@ -103,10 +103,10 @@ std::optional<TreeEntry> parseTreeRecord(std::string_view record) {
 
 }  // namespace
 
-GitRepo::GitRepo(std::filesystem::path dir) : dir_(std::move(dir)) {
-    const GitResult result = runGit(dir_, {"rev-parse", "--show-object-format"});
+GitRepo::GitRepo(std::filesystem::path dir, FindRepo find) : dir_(std::move(dir)), find_(find) {
+    const GitResult result = run({"rev-parse", "--show-object-format"});
     if (result.exitCode != 0) {
-        throw GitError("not a Git repository: " + dir_.string());
+        throw GitError("not a Git repository: " + dir_.string() + notARepoReason(result.err));
     }
     const std::string_view format = trimNewline(result.out);
     if (format != "sha1") {
@@ -115,13 +115,21 @@ GitRepo::GitRepo(std::filesystem::path dir) : dir_(std::move(dir)) {
     }
 }
 
+std::vector<std::string> GitRepo::args(const std::vector<std::string>& args) const {
+    return gitArgs(dir_, args, find_);
+}
+
+GitResult GitRepo::run(const std::vector<std::string>& args) const {
+    return runGit(dir_, args, find_);
+}
+
 std::optional<ObjectId> GitRepo::resolveHead() const {
     // Step 1: read the ID HEAD points to. This only fails if there is none.
-    const GitResult head = runGit(dir_, {"rev-parse", "--verify", "--quiet", "HEAD"});
+    const GitResult head = run({"rev-parse", "--verify", "--quiet", "HEAD"});
     if (head.exitCode != 0) {
         // The normal reason: HEAD names a branch with no commits yet, so
         // symbolic-ref can still read the branch name. Anything else is broken.
-        const GitResult branch = runGit(dir_, {"symbolic-ref", "--quiet", "HEAD"});
+        const GitResult branch = run({"symbolic-ref", "--quiet", "HEAD"});
         if (branch.exitCode == 0) {
             return std::nullopt;
         }
@@ -131,8 +139,7 @@ std::optional<ObjectId> GitRepo::resolveHead() const {
 
     // Step 2: check that the ID is a commit we can read. We use the ID from
     // step 1, not HEAD, so a commit made in between can't change the answer.
-    const GitResult commit =
-        runGit(dir_, {"rev-parse", "--verify", "--quiet", id.hex() + "^{commit}"});
+    const GitResult commit = run({"rev-parse", "--verify", "--quiet", id.hex() + "^{commit}"});
     if (commit.exitCode != 0) {
         throw GitError("HEAD points to " + id.hex() +
                        ", which can't be read as a commit; the repository may be damaged");
@@ -143,8 +150,10 @@ std::optional<ObjectId> GitRepo::resolveHead() const {
 std::vector<TreeEntry> GitRepo::listFiles(const ObjectId& commit) const {
     // -r: walk into folders. -l: include sizes. -z: end each record with NUL
     // and print paths as they are. --full-tree: list from the repo root.
-    const GitResult result =
-        runOrThrow(dir_, {"ls-tree", "-r", "-l", "-z", "--full-tree", commit.hex()});
+    const std::vector<std::string> lsTree = {
+        "ls-tree", "-r", "-l", "-z", "--full-tree", commit.hex(),
+    };
+    const GitResult result = okOrThrow(run(lsTree), lsTree);
 
     std::vector<TreeEntry> entries;
     const std::string_view out = result.out;
@@ -164,7 +173,7 @@ std::vector<TreeEntry> GitRepo::listFiles(const ObjectId& commit) const {
 }
 
 BlobStream::BlobStream(const GitRepo& repo)
-    : git_("git", gitArgs(repo.dir(), {"cat-file", "--batch"}), gitEnv()) {}
+    : git_("git", repo.args({"cat-file", "--batch"}), gitEnv()) {}
 
 Blob BlobStream::read(const ObjectId& id, std::uint64_t maxBytes) {
     git_.write(id.hex() + "\n");

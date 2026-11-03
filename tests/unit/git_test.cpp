@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -239,6 +241,31 @@ TEST(FetchLatest, WorksWhenThePathHasANewline) {
     const ObjectId second = source.commit();
     fetchLatest(clone);
     EXPECT_EQ(GitRepo(clone).resolveHead(), second);
+}
+
+// With safe.bareRepository=explicit, Git won't find a bare repo through -C,
+// so clones are opened with --git-dir. Git's own reason is in the error.
+TEST(GitRepo, OpensClonesWhenBareReposMustBeNamed) {
+    TempRepo source;
+    source.write("a.txt", "one");
+    const ObjectId head = source.commit();
+    const TempDir dir;
+    const std::filesystem::path clone = dir.file("clone.git");
+    cloneShallow("file://" + source.dir().string(), clone);
+
+    const std::filesystem::path config = dir.file("gitconfig");
+    std::ofstream(config) << "[safe]\n\tbareRepository = explicit\n";
+    // setenv isn't safe while other threads use the environment. Each test
+    // runs in its own process, and this one starts no threads that read it.
+    ::setenv("GIT_CONFIG_GLOBAL", config.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+    EXPECT_EQ(GitRepo(clone, FindRepo::BareRepo).resolveHead(), head);
+    try {
+        const GitRepo found(clone);  // the default, with -C
+        ADD_FAILURE() << "expected a GitError, opened " << found.dir();
+    } catch (const GitError& error) {
+        EXPECT_NE(std::string(error.what()).find("bare"), std::string::npos) << error.what();
+    }
+    ::unsetenv("GIT_CONFIG_GLOBAL");  // NOLINT(concurrency-mt-unsafe)
 }
 
 TEST(FetchLatest, NeverTouchesARepoAroundTheFolder) {

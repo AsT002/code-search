@@ -30,9 +30,13 @@ struct TreeEntry {
 class GitRepo {
 public:
     // Throws GitError if `dir` isn't in a Git repo, or the repo uses SHA-256.
-    explicit GitRepo(std::filesystem::path dir);
+    // `find` says how Git finds the repo (see FindRepo).
+    explicit GitRepo(std::filesystem::path dir, FindRepo find = FindRepo::FromFolder);
 
     const std::filesystem::path& dir() const { return dir_; }
+
+    // The arguments to run Git with `args` on this repo.
+    std::vector<std::string> args(const std::vector<std::string>& args) const;
 
     // The commit HEAD points to right now, or nothing if the current branch
     // has no commits yet. Throws GitError if HEAD points to something that
@@ -44,7 +48,11 @@ public:
     std::vector<TreeEntry> listFiles(const ObjectId& commit) const;
 
 private:
+    // Runs Git with `args` on this repo.
+    GitResult run(const std::vector<std::string>& args) const;
+
     std::filesystem::path dir_;
+    FindRepo find_ = FindRepo::FromFolder;
 };
 
 enum class BlobStatus {

@@ -162,14 +162,32 @@ void JsonResultWriter::file(const ResultFile& file) {
     first_ = false;
 }
 
+void JsonResultWriter::skipped(std::string_view repo, std::string_view message) {
+    std::string entry = skipped_.empty() ? "{" : ",{";
+    appendText(entry, "repo", repo);
+    entry += ",\"error\":";
+    appendString(entry, replaceInvalidUtf8(message));
+    entry += '}';
+    skipped_ += entry;
+}
+
+void JsonResultWriter::endFiles() {
+    *out_ << (first_ ? "" : "\n") << "]";
+    if (!skipped_.empty()) {
+        *out_ << ",\"skipped\":[" << skipped_ << "]";
+    }
+}
+
 void JsonResultWriter::finish(SearchStatus status) {
-    *out_ << (first_ ? "" : "\n") << R"(],"status":")" << statusName(status) << "\"}\n";
+    endFiles();
+    *out_ << R"(,"status":")" << statusName(status) << "\"}\n";
 }
 
 void JsonResultWriter::fail(std::string_view message) {
     std::string text;
     appendString(text, replaceInvalidUtf8(message));
-    *out_ << (first_ ? "" : "\n") << R"(],"status":"error","error":)" << text << "}\n";
+    endFiles();
+    *out_ << R"(,"status":"error","error":)" << text << "}\n";
 }
 
 }  // namespace codesearch

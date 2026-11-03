@@ -1,13 +1,13 @@
 #include "codesearch/query/parser.hpp"
 
-#include <re2/re2.h>
-
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "codesearch/query/language.hpp"
+#include "codesearch/search/regex_matcher.hpp"
 
 namespace codesearch {
 
@@ -354,6 +354,10 @@ private:
         if (peek().kind == TokenKind::Close) {
             return "there's nothing inside ( )";
         }
+        const bool afterOpen = next_ > 0 && tokens_[next_ - 1].kind == TokenKind::Open;
+        if (afterOpen) {
+            return "a ( is missing its )";  // like "foo (": the query ends after it
+        }
         return "the query is empty";
     }
 
@@ -384,13 +388,10 @@ private:
     }
 
     static QueryNode parseRegex(const Token& token) {
-        // Only to check it; the evaluator compiles it again with the
-        // query's options. log_errors(false): RE2 would print the error.
-        RE2::Options options;
-        options.set_log_errors(false);
-        const RE2 check(token.text, options);
-        if (!check.ok()) {
-            throw QueryError("the regex " + token.typed + " isn't valid: " + check.error());
+        // Only to check it, with the options and memory RegexMatcher
+        // gives it; the evaluator compiles it again with the query's options.
+        if (const std::optional<std::string> problem = RegexMatcher::problemWith(token.text)) {
+            throw QueryError("the regex " + token.typed + " isn't valid: " + problem.value());
         }
         return token.forPath ? pathRegex(token.text) : regex(token.text);
     }

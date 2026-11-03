@@ -245,8 +245,12 @@ SearchStatus searchInTurn(std::span<const SearchTarget> targets, const SearchReq
                                 content, request, remaining, onFile);
                 },
                 request.cancelled, !request.filesOnly);
-        } catch (const IndexFileError&) {
-            rethrowNamed(std::current_exception(), target.name);
+        } catch (const IndexFileError& damaged) {
+            if (!request.onDamaged || target.name.empty()) {
+                rethrowNamed(std::current_exception(), target.name);
+            }
+            request.onDamaged(RepoIndexError(target.name, damaged.what()));
+            continue;  // on to the next repo
         }
         if (status != SearchStatus::Complete) {
             return status;
@@ -262,18 +266,16 @@ constexpr std::size_t kChunkFiles = 16;
 // How many tasks may be running or finished but not yet used, per thread.
 constexpr std::size_t kChunksPerThread = 4;
 
-// About the most bytes of results the pool may hold that the caller hasn't
-// taken yet, finished or still being made. Without it, a search where every
-// line matches could hold the results of hundreds of files at once. It can
-// go over by what each thread makes for the file it's on.
-constexpr std::size_t kMaxHeldBytes = std::size_t{32} << 20U;  // 32 MiB
-
 // Searches the repos on a thread pool. The files are checked in chunks by
 // the pool's threads, while the calling thread takes the finished chunks in
 // order and turns them into results. So the results come out in the same
 // order as searchInTurn gives, and the limit works the same way.
 //
-// What's held is kept near kMaxHeldBytes in two ways:
+// The pool holds at most about request.maxHeldBytes of results the caller
+// hasn't taken yet, finished or still being made. Without that, a search
+// where every line matches could hold the results of hundreds of files at
+// once. It can go over by what each thread makes for the file it's on. It's
+// kept there in two ways:
 //
 // - The bytes of results are counted as they're made. Once the limit is
 //   reached, no more chunks are handed out, and a task stops at the next
@@ -357,6 +359,8 @@ private:
     Found makeFound(const Evaluator& evaluator, DocId doc, std::string_view path,
                     std::string_view content) const;
     bool pass(const Repo& repo, Found& found, std::size_t& remaining);
+    void skipOrThrow(std::size_t repo, const std::exception_ptr& error);
+    SearchStatus takeResults(Chunk& chunk, std::size_t& remaining);
     bool cancelled() const { return request_.cancelled != nullptr && request_.cancelled->load(); }
 
     std::span<const SearchTarget> targets_;
@@ -364,6 +368,9 @@ private:
     const std::function<void(const ResultFile& file)>& onFile_;
 
     std::vector<Repo> repos_;
+    // Repos found damaged and skipped (see SearchRequest::onDamaged). Their
+    // chunks still in pending_ are dropped as they come up.
+    std::vector<bool> skipped_;
     // Chunks handed out and not taken yet, oldest first. unique_ptr, so a
     // chunk stays where it is while a task fills it.
     std::deque<std::unique_ptr<Chunk>> pending_;
@@ -409,7 +416,7 @@ void ParallelSearch::prepare() {
 }
 
 // How many files the next chunk gets: as many as fit in one chunk's share
-// of kMaxHeldBytes, by the average result size per file so far. Until a
+// of request_.maxHeldBytes, by the average result size per file so far. Until a
 // chunk has finished, there's nothing to go by, so the first chunks get one
 // file each (and fill() hands out only one per thread).
 std::size_t ParallelSearch::nextChunkFiles() {
@@ -418,12 +425,12 @@ std::size_t ParallelSearch::nextChunkFiles() {
         return 1;
     }
     const std::size_t perFile = std::max<std::size_t>(bytesSeen_ / filesSeen_, 1);
-    const std::size_t share = kMaxHeldBytes / (request_.pool->size() * kChunksPerThread);
+    const std::size_t share = request_.maxHeldBytes / (request_.pool->size() * kChunksPerThread);
     return std::clamp<std::size_t>(share / perFile, 1, kChunkFiles);
 }
 
 // Hands out chunks until there are enough in flight, or the results they'd
-// make wouldn't fit in kMaxHeldBytes. There's always at least one, so the
+// make wouldn't fit in request_.maxHeldBytes. There's always at least one, so the
 // search never stalls.
 void ParallelSearch::fill() {
     const std::size_t window = request_.pool->size() * kChunksPerThread;
@@ -443,7 +450,7 @@ void ParallelSearch::fill() {
             nextCandidate_ = 0;
             continue;
         }
-        if (!pending_.empty() && heldBytes_ >= kMaxHeldBytes) {
+        if (!pending_.empty() && heldBytes_ >= request_.maxHeldBytes) {
             return;  // wait for the caller to take some
         }
         const std::size_t files = nextChunkFiles();
@@ -457,7 +464,7 @@ void ParallelSearch::fill() {
             // partway through big files when the limit is reached.
             const std::size_t perFile = filesSeen_ == 0 ? 0 : bytesSeen_ / filesSeen_;
             const std::size_t expected = heldBytes_ + (perFile * (filesRunning_ + files));
-            if (!pending_.empty() && expected > kMaxHeldBytes) {
+            if (!pending_.empty() && expected > request_.maxHeldBytes) {
                 return;
             }
         }
@@ -549,7 +556,7 @@ void ParallelSearch::check(Chunk& chunk) {
                 break;
             }
             const bool mustCheck = i == chunk.begin && chunk.checkOneAnyway;
-            if (!mustCheck && heldBytes_ >= kMaxHeldBytes) {
+            if (!mustCheck && heldBytes_ >= request_.maxHeldBytes) {
                 chunk.stoppedForMemory = true;
                 chunk.end = i;  // the caller hands out the rest later
                 break;
@@ -604,20 +611,68 @@ bool ParallelSearch::pass(const Repo& repo, Found& found, std::size_t& remaining
     if (!hasLines) {
         return emit(name, found.path, {}, found.lineCount, "", request_, remaining, onFile_);
     }
+    // An IndexFileError from reading the content goes to run().
     bool keepGoing = false;
-    try {
-        repo.target->index->withContent(found.doc, [&](std::string_view content) {
-            keepGoing = emit(name, found.path, found.matches, found.lineCount, content, request_,
-                             remaining, onFile_);
-        });
-    } catch (const IndexFileError&) {
-        rethrowNamed(std::current_exception(), name);
-    }
+    repo.target->index->withContent(found.doc, [&](std::string_view content) {
+        keepGoing = emit(name, found.path, found.matches, found.lineCount, content, request_,
+                         remaining, onFile_);
+    });
     return keepGoing;
+}
+
+// A damaged index was found in repo number `repo`: with onDamaged, reports
+// it and skips the rest of the repo. Otherwise, and for any other error,
+// throws it.
+void ParallelSearch::skipOrThrow(std::size_t repo, const std::exception_ptr& error) {
+    const std::string& name = repos_[repo].target->name;
+    if (!request_.onDamaged || name.empty()) {
+        rethrowNamed(error, name);
+    }
+    try {
+        std::rethrow_exception(error);
+    } catch (const IndexFileError& damaged) {
+        request_.onDamaged(RepoIndexError(name, damaged.what()));
+    }
+    skipped_[repo] = true;
+    if (nextRepo_ == repo) {
+        // Hand out no more of it. Repos are handed out in order, so if
+        // this isn't the one being handed out, all of it already was.
+        ++nextRepo_;
+        nextCandidate_ = 0;
+    }
+}
+
+// Passes on a finished chunk's results, unless its repo was skipped.
+// Returns Complete if they all went, or why they stopped.
+SearchStatus ParallelSearch::takeResults(Chunk& chunk, std::size_t& remaining) {
+    if (skipped_[chunk.repo]) {
+        return SearchStatus::Complete;  // dropped
+    }
+    const Repo& repo = repos_[chunk.repo];
+    try {
+        for (Found& found : chunk.found) {
+            if (cancelled()) {
+                return SearchStatus::Cancelled;
+            }
+            if (!pass(repo, found, remaining)) {
+                return SearchStatus::Truncated;
+            }
+        }
+    } catch (const IndexFileError&) {
+        skipOrThrow(chunk.repo, std::current_exception());
+        return SearchStatus::Complete;
+    }
+    // A task stops at the first damaged file, keeping the matches before
+    // it. Those came first, as with searchInTurn.
+    if (chunk.error) {
+        skipOrThrow(chunk.repo, chunk.error);
+    }
+    return SearchStatus::Complete;
 }
 
 SearchStatus ParallelSearch::run() {
     prepare();
+    skipped_.assign(repos_.size(), false);
     std::size_t remaining =
         request_.maxResults == 0 ? std::numeric_limits<std::size_t>::max() : request_.maxResults;
     fill();
@@ -635,26 +690,16 @@ SearchStatus ParallelSearch::run() {
                 return chunk.done;
             });
         }
-        const Repo& repo = repos_[chunk.repo];
-        for (Found& found : chunk.found) {
-            if (cancelled()) {
-                return SearchStatus::Cancelled;
-            }
-            if (!pass(repo, found, remaining)) {
-                return SearchStatus::Truncated;
-            }
-        }
-        // A task stops at the first damaged file, keeping the matches before
-        // it. Those come first, as with searchInTurn.
-        if (chunk.error) {
-            rethrowNamed(chunk.error, repo.target->name);
+        const SearchStatus taken = takeResults(chunk, remaining);
+        if (taken != SearchStatus::Complete) {
+            return taken;
         }
         // A chunk cancelling cut short is missing files.
         if (chunk.cutShort) {
             return SearchStatus::Cancelled;
         }
         heldBytes_ -= chunk.bytes;
-        if (chunk.stoppedForMemory) {
+        if (chunk.stoppedForMemory && !skipped_[chunk.repo]) {
             // The rest of the chunk comes next, before anything after it.
             auto rest = std::make_unique<Chunk>();
             rest->repo = chunk.repo;

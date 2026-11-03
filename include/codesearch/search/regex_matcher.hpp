@@ -39,10 +39,13 @@ public:
 
     // Calls onMatch for each non-empty match, left to right, without
     // overlaps, as RE2 finds them: each one starts as early as it can.
-    // Return false from onMatch to stop. Stops by itself after a time
-    // limit (100 ms plus 1 microsecond per byte), which only a pathological regex
-    // and text reach (see the .cpp). The limit is checked between searches,
-    // so one slow search can still run past it.
+    // Return false from onMatch to stop. After a limit on the CPU time
+    // used (100 ms plus 1 microsecond per byte), which only a pathological
+    // regex and text reach (see the .cpp), it gives only the first match
+    // in each line that's left, so a line with a match still gets one
+    // (unless the regex matches empty there before it, see the .cpp). The
+    // limit is checked between searches, so one slow search can still run
+    // past it.
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
 
     // The compiled regex, for the planner (see planCandidates).

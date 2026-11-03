@@ -66,7 +66,7 @@ Put the query in quotes, so the shell passes it as one argument:
 ```
 
 Colors are on for a terminal and off for a pipe, as with grep; `--color=always`
-or `--color=never` decides, and `NO_COLOR` turns them off. On a terminal, bytes
+or `--color=never` decides. Without either, `NO_COLOR` turns them off. On a terminal, bytes
 from files that could control it, like escape sequences, are shown as `\xHH`.
 With `--json` the output is always one JSON document, even after an error.
 
@@ -98,7 +98,8 @@ up after `update`. For a GitHub repo, `update` fetches the latest commit of its
 default branch first. If nothing changed, it does nothing. Changing a single
 file still rebuilds the whole index, which takes under a second for
 golang/go. If a search or `verify` finds a damaged index, it tells you to run
-`update <name> --rebuild`.
+`update <name> --rebuild`. A search skips a damaged repo with a warning and
+searches the others; only when no repo is left to search is it an error.
 GitHub repos are cloned without a working copy into code-search's own folder.
 Only `https://github.com/<owner>/<repo>` URLs are accepted.
 
@@ -108,7 +109,7 @@ minified JS and CSS are skipped. `add` prints a summary of what was skipped.
 A local repo is added by its top folder, the one with `.git` in it (or the repo
 folder itself for a bare repo). Subfolders are refused.
 
-Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` if it's set. That
+Data is kept in `~/.code-search`, or in `$CODE_SEARCH_HOME` (a full path) if it's set. That
 folder must be new, empty or already used by code-search: it refuses a folder
 that holds other files. Only one `add`, `update` or `remove` runs at a time; a
 second one waits. Searches never wait.

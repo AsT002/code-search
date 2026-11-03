@@ -263,6 +263,11 @@ Registry registryFromJson(std::string_view text) {
         bad(std::string("not valid JSON: ") + error.what());
     }
     const std::uint32_t version = u32Field(json, "version");
+    if (version > kRegistryVersion) {
+        throw NewerRegistryError("it has version " + std::to_string(version) +
+                                 ", but this code-search reads version " +
+                                 std::to_string(kRegistryVersion));
+    }
     if (version != kRegistryVersion) {
         bad("it has version " + std::to_string(version) + ", but this program reads version " +
             std::to_string(kRegistryVersion));
@@ -305,6 +310,9 @@ Registry JsonRegistryStore::load() const {
     text << in.rdbuf();
     try {
         return registryFromJson(text.str());
+    } catch (const NewerRegistryError& error) {
+        throw NewerRegistryError(path_.string() + " was written by a newer code-search: " +
+                                 error.what() + ". Install the newer version to use it");
     } catch (const RegistryError& error) {
         throw RegistryError(path_.string() + " is damaged: " + error.what() +
                             ". Put back a copy that works, or remove the folder " +

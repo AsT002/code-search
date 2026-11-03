@@ -12,6 +12,7 @@
 #include "codesearch/query/ast.hpp"
 #include "codesearch/repo/registry.hpp"
 #include "codesearch/repo/workspace.hpp"
+#include "codesearch/search/repo_search.hpp"
 
 namespace codesearch {
 
@@ -102,10 +103,13 @@ struct OpenRepo {
 // name: every repo except those where resolveRepo makes the query false. So
 // "repo:a foo" opens only a. Doesn't take the lock, so it works while a
 // change runs. If an index file was deleted between reading the registry and
-// opening the file, the registry changed: read it again and retry once.
-// Throws std::runtime_error if the query names a repo that isn't added, and
-// IndexFileError (naming the repo) if an index is damaged or doesn't match
-// the registry (matchesRegistry).
-std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query);
+// opening the file, the registry changed: read it again and retry, a few
+// times. Throws std::runtime_error if the query names a repo that isn't
+// added. If an index is damaged or doesn't match the registry
+// (matchesRegistry), the error is a RepoIndexError naming the repo, with how
+// to rebuild it. With `damaged`, the repo is left out and the error added
+// there; without it, the error is thrown.
+std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query,
+                                std::vector<RepoIndexError>* damaged = nullptr);
 
 }  // namespace codesearch

@@ -181,7 +181,9 @@ bool takesValue(std::string_view arg) {
 }
 
 // True if --json is among the search arguments, before any "--". Skips
-// option values, so the "--" in "--path -- --json" is a path.
+// option values the way parseSearchArgs does, so the "--" in
+// "--path -- --json" is a path, and the --json in "-C --json", which isn't
+// a number, is still --json.
 bool asksForJson(std::span<char*> args) {
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view text = args[i];
@@ -191,7 +193,8 @@ bool asksForJson(std::span<char*> args) {
         if (text == "--json") {
             return true;
         }
-        if (takesValue(text)) {
+        SearchArgs ignored;
+        if (takesValue(text) && i + 1 < args.size() && readOption(text, args[i + 1], ignored)) {
             ++i;  // its value
         }
     }
@@ -466,6 +469,50 @@ SearchStatus printResults(std::span<const SearchTarget> targets, const SearchReq
     return status;
 }
 
+// A repo left out of the search because its index is damaged: says so on
+// stderr, and in the JSON. The search goes on with the other repos.
+void reportSkipped(const std::string& repo, const std::string& message, JsonResultWriter* json) {
+    std::cerr << "code-search: skipped " << forTerminal(message, STDERR_FILENO) << '\n';
+    if (json != nullptr) {
+        json->skipped(repo, message);
+    }
+}
+
+// Opens the added repos `request` could match. A damaged one is skipped
+// with a warning, both here and if the search finds damage later
+// (request.onDamaged). If no repo is left to search, that's an error.
+std::vector<OpenRepo> openAddedRepos(SearchRequest& request, JsonResultWriter* json) {
+    const Workspace workspace(Workspace::defaultRoot());
+    if (loadRegistry(workspace).repos.empty()) {
+        throw std::runtime_error("no repos added yet. Add one with: code-search add <folder>");
+    }
+    std::vector<RepoIndexError> damaged;
+    std::vector<OpenRepo> repos = openRepos(workspace, request.query, &damaged);
+    if (repos.empty() && !damaged.empty()) {
+        // Every repo the query could match is damaged: nothing to search.
+        std::string message = damaged[0].what();
+        for (std::size_t i = 1; i < damaged.size(); ++i) {
+            message += "\n" + std::string(damaged[i].what());
+        }
+        throw IndexFileError(message);
+    }
+    for (const RepoIndexError& error : damaged) {
+        reportSkipped(error.repo(), error.what(), json);
+    }
+    // Damage found during the search skips the rest of that repo too,
+    // unless it's the last repo left: then it's an error, as above.
+    // `mutable` lets the lambda change its own copy of `left`.
+    request.onDamaged = [json, left = repos.size()](const RepoIndexError& error) mutable {
+        const std::string message = error.what() + rebuildHint(error.repo());
+        --left;
+        if (left == 0) {
+            throw IndexFileError(message);
+        }
+        reportSkipped(error.repo(), message, json);
+    };
+    return repos;
+}
+
 // Ctrl-C stopped the command: says so, and ends the JSON document.
 int reportCancelled(JsonResultWriter* json) {
     if (json != nullptr) {
@@ -513,14 +560,10 @@ int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
         }
         targets.push_back({.name = "", .index = &built->built.index});
     } else {
-        const Workspace workspace(Workspace::defaultRoot());
-        if (loadRegistry(workspace).repos.empty()) {
-            throw std::runtime_error("no repos added yet. Add one with: code-search add <folder>");
-        }
         if (!args.repoName.empty()) {
             request.query = allOf({repoFilter(args.repoName), request.query});
         }
-        repos = openRepos(workspace, request.query);
+        repos = openAddedRepos(request, json);
         for (const OpenRepo& repo : repos) {
             targets.push_back({.name = repo.name, .index = repo.index.get()});
         }
@@ -603,6 +646,30 @@ int runList() {
                   << forTerminal(repo.location, STDOUT_FILENO) << '\n';
     }
     return 0;
+}
+
+struct UpdateArgs {
+    std::string name;
+    bool rebuild = false;
+};
+
+// Reads the arguments after "update": a name, and maybe --rebuild before or
+// after it. Repo names never start with '-', so one that does is an option.
+std::optional<UpdateArgs> parseUpdateArgs(std::span<char*> args) {
+    UpdateArgs result;
+    for (const std::string_view arg : args) {
+        if (arg == "--rebuild" && !result.rebuild) {
+            result.rebuild = true;
+        } else if (!arg.starts_with('-') && result.name.empty()) {
+            result.name = arg;
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (result.name.empty()) {
+        return std::nullopt;
+    }
+    return result;
 }
 
 int runUpdate(const std::string& name, bool rebuild) {
@@ -688,11 +755,11 @@ int run(std::span<char*> args) {
         }
     } else if (command == "list" && args.size() == 2) {
         return runList();
-    } else if (command == "update" && args.size() == 3) {
-        return runUpdate(args[2], false);
-    } else if (command == "update" && args.size() == 4 &&
-               std::string_view(args[3]) == "--rebuild") {
-        return runUpdate(args[2], true);
+    } else if (command == "update") {
+        const std::optional<UpdateArgs> updateArgs = parseUpdateArgs(args.subspan(2));
+        if (updateArgs.has_value()) {
+            return runUpdate(updateArgs->name, updateArgs->rebuild);
+        }
     } else if (command == "remove" && args.size() == 3) {
         return runRemove(args[2]);
     } else if (command == "verify" && args.size() == 3) {
@@ -723,6 +790,10 @@ int main(int argc, char* argv[]) {
     // we can handle instead of killing the program. static_cast<void> says
     // we mean to ignore the return value.
     static_cast<void>(std::signal(SIGPIPE, SIG_IGN));
+    // A program that started us with SIGCHLD ignored would make the system
+    // reap our children itself, so waiting for Git would fail and every
+    // Git command would look like it failed. Set it back to the default.
+    static_cast<void>(std::signal(SIGCHLD, SIG_DFL));
 
     try {
         const int exitCode = run(std::span<char*>(argv, static_cast<std::size_t>(argc)));
