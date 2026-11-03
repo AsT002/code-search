@@ -1,0 +1,184 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #656d76;
+  --border: #d0d7de;
+  --panel: #f6f8fa;
+  --mark: #fff1a8;
+  --accent: #0969da;
+  --error: #cf222e;
+  --warning: #9a6700;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #8d96a0;
+    --border: #30363d;
+    --panel: #161b22;
+    --mark: #5c4b00;
+    --accent: #4493f8;
+    --error: #f85149;
+    --warning: #d29922;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 16px 48px;
+}
+
+header {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 16px 0 12px;
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+
+h1 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+.query {
+  width: 100%;
+  padding: 8px 10px;
+  font: 15px var(--mono);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.query:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 10px;
+  color: var(--muted);
+}
+
+.filters input[type="number"] {
+  width: 64px;
+}
+
+.searching {
+  margin-left: auto;
+}
+
+.summary p {
+  margin: 14px 0 6px;
+  color: var(--muted);
+}
+
+.summary .error,
+.error {
+  color: var(--error);
+  white-space: pre-wrap;
+}
+
+.summary .warning {
+  color: var(--warning);
+  white-space: pre-wrap;
+}
+
+.file {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.file-name {
+  margin: 0;
+  padding: 6px 10px;
+  background: var(--panel);
+  font: 600 13px var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.file .lines {
+  border-top: 1px solid var(--border);
+}
+
+.repo-name {
+  color: var(--muted);
+  font-weight: normal;
+}
+
+.repo-name::after {
+  content: " / ";
+}
+
+.lines {
+  overflow-x: auto;
+  font: 13px/1.45 var(--mono);
+}
+
+.line {
+  display: flex;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.line-number {
+  flex: none;
+  width: 56px;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+
+.context-line .line-text {
+  color: var(--muted);
+}
+
+.line-text {
+  font: inherit;
+}
+
+mark {
+  background: var(--mark);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.gap {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+.help {
+  margin-top: 20px;
+  color: var(--muted);
+}
+
+.help code {
+  color: var(--fg);
+  margin-right: 8px;
+}

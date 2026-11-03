@@ -10,6 +10,7 @@ Work in progress. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the desig
 - Ninja
 - A C++20 compiler (Clang or GCC)
 - Optional: `clang-format` and `clang-tidy` (on macOS, `brew install llvm`)
+- For the web UI: Node.js 20 or newer
 
 Tested on macOS with Apple Clang. Linux should work but hasn't been tested yet.
 
@@ -127,6 +128,34 @@ every time, which is slow on big repos:
 ```sh
 ./build/debug/code-search search --path ~/projects/other "authenticate"
 ```
+
+## Web UI and HTTP API
+
+```sh
+npm --prefix web ci                     # once
+npm --prefix web run build              # makes web/dist
+./build/debug/code-search serve         # http://127.0.0.1:7700
+```
+
+Open http://127.0.0.1:7700 to search from the browser. `--port` picks
+another port, and `--ui <folder>` serves the UI from somewhere other than
+`web/dist`. Ctrl-C stops the server. It only listens on 127.0.0.1.
+
+The API is under `/api/v1/`. A search gives the same JSON as `search --json`:
+
+```sh
+curl 'http://127.0.0.1:7700/api/v1/search?q=authenticate&max_results=20'
+curl http://127.0.0.1:7700/api/v1/repos
+curl -X POST -H 'Content-Type: application/json' \
+     -d '{"source":"/path/to/repo"}' http://127.0.0.1:7700/api/v1/repos
+```
+
+All routes, parameters and errors are in
+[HTTP API](docs/ARCHITECTURE.md#http-api).
+
+To work on the UI, run `code-search serve` and `npm --prefix web run dev`
+together, and open http://localhost:5173. Vite reloads the page on each change
+and passes `/api` to the server. `npm --prefix web test` runs the UI tests.
 
 ## Formatting
 

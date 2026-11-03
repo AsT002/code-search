@@ -9,6 +9,8 @@ file(GLOB_RECURSE _codesearch_sources CONFIGURE_DEPENDS
   ${PROJECT_SOURCE_DIR}/include/*.hpp
   ${PROJECT_SOURCE_DIR}/src/*.cpp
   ${PROJECT_SOURCE_DIR}/cli/*.cpp
+  ${PROJECT_SOURCE_DIR}/server/*.hpp
+  ${PROJECT_SOURCE_DIR}/server/*.cpp
   ${PROJECT_SOURCE_DIR}/tests/*.cpp
   ${PROJECT_SOURCE_DIR}/benchmarks/*.cpp
 )

@@ -409,6 +409,49 @@ many bytes the trigram step saves and the end-to-end speed.
 
 ## M9: HTTP API and UI
 
+Status: done. Notes:
+
+- `SearchService` (in `app/`) now holds what the CLI did to search added
+  repos: parse, open the indexes, skip damaged repos, search. It has two
+  steps, `prepare` and `run`, so the server can answer a bad query with a
+  status code before it starts sending results. The CLI and the server both
+  use it, and both write results with `JsonResultWriter`, so a finished
+  search gives the same bytes. A test runs the real CLI next to the server
+  for 13 queries, errors included, and compares them byte for byte.
+- cpp-httplib 0.64.0, pinned by hash like the other dependencies. Only
+  `server/http_server.cpp` includes it. `code-search serve` runs it.
+- Search is a `GET` with the query in the URL, since it changes nothing.
+  The answer is sent in 16 KiB pieces as files are found.
+- Cancelling: a watchdog thread checks each running search every 50 ms and
+  sets its cancel flag if the client closed the connection or the 30 second
+  limit passed. Writing to a closed connection stops it too. A timeout ends
+  the document with `"status":"error"` instead of adding a status value, so
+  the JSON format from M6 doesn't change.
+- Other sites: `Host` must be the server's own (stops DNS rebinding), a
+  foreign `Origin` is turned away, and a `POST` must be JSON (stops plain
+  form posts). Plus `nosniff` and a Content-Security-Policy.
+- `IndexCache` keeps up to 64 index files open between searches. It closes
+  files the registry no longer names on each search, so an update never
+  leaves old files open for long. A search holds a `shared_ptr` to each file,
+  so a file an update deletes partway through a search stays readable. A test
+  runs an update while a search is paused after its first file, and the
+  search still gives the old results.
+- The registry stays JSON: the server changes repos through `RepoManager`,
+  which takes the same lock as the CLI, and reads never need it.
+- The UI (`web/`) is React 19, TypeScript 7 and Vite 8. Match positions are
+  byte offsets, so the UI cuts the line's bytes (from `text_base64` when the
+  text wasn't valid UTF-8) and decodes each piece. All file text is React
+  text nodes, never HTML; a test renders `<script>` in content, paths and
+  error messages and checks it comes out escaped. It searches 250 ms after
+  typing stops, and aborts the previous request.
+- `code-search serve` blocks SIGINT and SIGTERM in every thread and waits for
+  them with `sigwait`, since stopping the server isn't safe inside a signal
+  handler. Shells start background jobs with SIGINT ignored, and an ignored
+  signal never reaches `sigwait`, so `serve` sets both back to the default
+  first.
+- The UI hasn't been checked in a real browser by an automated test. The
+  server, the API and the rendering functions are tested.
+
 - C++ HTTP server (cpp-httplib) around `SearchService` and `RepoManager`.
 - Listen on localhost only, limit request size, support cancelling and timeouts,
   protect anything that changes state. Define errors, versioning and what

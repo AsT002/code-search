@@ -11,7 +11,7 @@ The milestones are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ## Principles
 
-1. The engine is a library. The CLI and the later HTTP server are thin layers on top.
+1. The engine is a library. The CLI and the HTTP server are thin layers on top.
 2. Every source is a Git repo. A GitHub URL gets cloned first; a local path must
    already be a Git repo. After that, both go through the same code.
 3. Each index is a snapshot of one commit. We look up the commit ID once and use
@@ -32,7 +32,7 @@ The milestones are in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  FRONTENDS          cli/  (now)            server/ + React  (later) │
+│  FRONTENDS          cli/                   server/ + web/ (React)   │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │ calls
 ┌───────────────────────────────▼─────────────────────────────────────┐
@@ -69,7 +69,7 @@ test and benchmark the core without Git.
 | `query/`  | Parse a query into a tree and plan how to run it | `parseQuery`, `QueryNode`, `resolveRepo`, `planCandidates`, `TrigramQuery` |
 | `search/` | Find candidate files, check them, collect matches, limit and format results | `LiteralMatcher`, `Evaluator`, `searchRepos`, `JsonResultWriter` |
 | `util/`   | Small shared helpers, and `ObjectId`, which both `git/` and `index/` use | `Process`, `MmapFile`, `ObjectId`, `AtomicFile`, `ThreadPool`, `FileLock` |
-| `app/`    | Tie the modules together | `RepoManager`, `openRepos`, later `SearchService` |
+| `app/`    | Tie the modules together | `RepoManager`, `openRepos`, `SearchService`, `IndexCache` |
 
 ### Main interfaces
 
@@ -771,6 +771,75 @@ index shortcut literals get there.
 `sym:authenticate` needs a symbol table, built at index time with universal-ctags
 or tree-sitter. It would be one more kind of query part.
 
+## HTTP API
+
+`code-search serve` runs the server on 127.0.0.1:7700 (`--port` to change it)
+until Ctrl-C. It serves the API under `/api/v1/` and the built web UI at `/`.
+The `1` changes only for a change that breaks clients; new fields and routes
+don't count.
+
+| Route | Answer |
+|-------|--------|
+| `GET /api/v1/version` | `{"version":"0.1.0","api":1}` |
+| `GET /api/v1/search?q=...` | The `search --json` document |
+| `GET /api/v1/repos` | `{"repos":[{"name","source","location","commit"}]}` |
+| `POST /api/v1/repos` `{"source","name"}` | Adds a repo: 201 with `{"repo","report"}` |
+| `POST /api/v1/repos/<name>/update` `{"rebuild"}` | `{"repo","rebuilt","reason","report"}`; `report` only if rebuilt |
+| `DELETE /api/v1/repos/<name>` | `{"repo"}` |
+
+Search takes `q`, and optionally `repo`, `case_sensitive` and `files_only`
+(`true` or `false`), `max_results` and `context`, with the same meaning as
+the CLI's options. An unknown or repeated parameter is an error. The answer is
+the same document the CLI prints, made by the same code (`SearchService`
+and `JsonResultWriter`), so a finished search gives the same bytes either way.
+It's sent in pieces as files are found, so a big result never sits in memory.
+
+Errors:
+
+- Search: errors found before it starts get a status and the CLI's error
+  document, `{"files":[],"status":"error","error":"..."}`. 400 for a bad query
+  or parameter, 404 for an unknown repo or none added, 500 for damaged
+  indexes. Once results are being sent the status is 200, and an error ends the
+  document with `"status":"error"`, as in the CLI.
+- Everything else: `{"error":{"code":"...","message":"..."}}`. 400
+  `bad_request`, 403 `forbidden`, 404 `not_found` or `unknown_repo`, 413 for a
+  body over 64 KiB, 415 `unsupported_media_type`, 422 `failed` when a change
+  couldn't be made (the message says why: not a Git repo, name taken, Git
+  failed), 500 `internal`.
+
+Stopping a search:
+
+- A search stops at the next file once its client closes the connection. The
+  web UI does that when a new search starts. A thread checks every 50 ms,
+  since a search that finds little would otherwise not notice.
+- After 30 seconds it stops, and the document ends with `"status":"error"`
+  and a message saying so. The files before it are still there.
+- A client that stops reading for 10 seconds counts as gone.
+
+Limits for a long-running process: 8 requests are answered at once and up to
+64 more wait; more are turned away. Searches share one pool of threads for
+checking files, as in the CLI. `IndexCache` keeps up to 64 index files open
+between searches, closing the one used longest ago, and closes files the
+registry no longer names. A search holds its files until it's done, so an
+update during a search doesn't change its results: the old file stays
+readable after it's deleted.
+
+The server and the CLI change repos through the same `RepoManager` and its
+lock, and both read the registry without it, so there's no need for SQLite.
+
+Requests a web page on another site could send are turned away:
+
+- The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`. This
+  stops DNS rebinding, where a site points its own name at 127.0.0.1 to read
+  the answers.
+- An `Origin` header, if there is one, must be this server's.
+- A `POST` must have `Content-Type: application/json`. An HTML form can't send
+  that, and a script on another site would have to ask first (a CORS
+  preflight), which the server never allows.
+- Every answer has `X-Content-Type-Options: nosniff`, so JSON can't be loaded
+  as a script, and a `Content-Security-Policy` that lets the UI load only its
+  own files and stops other sites from framing it.
+
 ## Security
 
 - Git runs without a shell (`posix_spawn` with an argument list). That stops shell
@@ -783,9 +852,9 @@ or tree-sitter. It would be one more kind of query part.
   clone, we check that its real path (after following symlinks) is inside
   `~/.code-search/repos/`.
 - The reader treats index files as untrusted. See "Checking index files".
-- The HTTP server (M9) listens on localhost only, limits request size, supports
-  cancelling, escapes file content in HTML, and protects anything that changes
-  state.
+- The HTTP server listens on 127.0.0.1 only and turns away requests a page on
+  another site could send (see "HTTP API"). The web UI renders file content as
+  text, never as HTML.
 
 ## Decisions
 
@@ -833,7 +902,7 @@ or tree-sitter. It would be one more kind of query part.
 | Common trigrams match too many files | Searches scan too much. Then try storing positions or splitting files into chunks |
 | Reading contents from Git instead of storing them | Only after testing cold reads and `git gc` |
 | Indexing uncommitted changes | Design it as a separate snapshot type when we want it |
-| Old index files and caches piling up in memory | Add limits before the long-running server |
+| Old index files piling up in the server | Done in M9: `IndexCache` keeps at most 64 open, and closes files the registry no longer names |
 
 ## Source tree
 
@@ -851,16 +920,19 @@ code-search/
 │   ├── query/      ast.hpp  parser.hpp  language.hpp  planner.hpp  trigram_query.hpp
 │   ├── search/     literal_matcher.hpp  regex_matcher.hpp  candidates.hpp  evaluator.hpp  searcher.hpp
 │   │               repo_search.hpp  json_output.hpp
-│   ├── app/        index_commit.hpp  repo_manager.hpp
+│   ├── app/        index_commit.hpp  repo_manager.hpp  search_service.hpp  index_cache.hpp
 │   └── util/       process.hpp  utf8.hpp  mmap_file.hpp  atomic_file.hpp  varint.hpp  endian.hpp
 │                   object_id.hpp  thread_pool.hpp  file_lock.hpp  ascii.hpp
 ├── src/                        same layout as include/
 ├── cli/main.cpp                builds the `code-search` program
+├── server/                     http_server.hpp/.cpp: the HTTP API, run by `code-search serve`
+├── web/                        the React and TypeScript UI (Vite); `npm run build` makes web/dist
 ├── tests/
 │   ├── unit/                   one file per module
 │   ├── cli/                    runs the real `code-search` program
 │   ├── differential/           index search vs brute force
 │   ├── integration/            Git to search, start to finish
+│   ├── server/                 the HTTP server, against the real CLI
 │   ├── fuzz/                   index reader (the parser's random tests are in unit/)
 │   └── support/                brute-force search, temp Git repos, a fake `git` for broken output
 ├── benchmarks/                 search_bench, run_benchmarks.py, repos.tsv, queries.tsv,
@@ -887,6 +959,8 @@ code-search update my-backend
 code-search update my-backend --rebuild
 code-search remove my-backend                    # never deletes your code
 code-search verify my-backend                    # full check of the index file
+code-search serve                                # HTTP API and web UI on 127.0.0.1:7700
+code-search serve --port 8080 --ui web/dist
 ```
 
 ## Testing
@@ -906,3 +980,5 @@ with the planner; otherwise a planner bug would hide itself.
 | Publishing | Kill the process after every write, fsync and rename. The current state stays complete, cleanup removes leftovers, a second change waits for the lock, and searches keep working |
 | Fuzzing | Opening and reading damaged index files; the query parser with deep nesting and long input. We keep the inputs that found bugs |
 | Sanitizers | ASan and UBSan, and TSan for the threaded search and build (`asan` and `tsan` presets) |
+| HTTP server | The same document as `search --json`, byte for byte, for finished searches and for errors before the search starts. Cancelling when the client goes away, the time limit, an update deleting the index file a search has open, searches at the same time, and requests from other sites turned away |
+| Web UI | `npm test` in `web/`: byte offsets to highlights (non-ASCII, cut characters, invalid UTF-8), and that file content, paths and messages come out escaped |

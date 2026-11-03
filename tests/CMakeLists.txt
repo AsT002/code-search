@@ -7,6 +7,7 @@ add_executable(codesearch_tests
   fuzz/shard_reader_fuzz_test.cpp
   integration/index_commit_test.cpp
   integration/repo_manager_test.cpp
+  server/http_server_test.cpp
   support/allocations.cpp
   support/brute_force.cpp
   support/fake_git.cpp
@@ -20,6 +21,7 @@ add_executable(codesearch_tests
   unit/git_errors_test.cpp
   unit/git_test.cpp
   unit/github_url_test.cpp
+  unit/index_cache_test.cpp
   unit/json_output_test.cpp
   unit/language_test.cpp
   unit/matcher_test.cpp
@@ -40,7 +42,8 @@ add_executable(codesearch_tests
   unit/varint_test.cpp
   unit/version_test.cpp
 )
-target_link_libraries(codesearch_tests PRIVATE codesearch_core re2::re2 nlohmann_json::nlohmann_json
+target_link_libraries(codesearch_tests PRIVATE codesearch_server re2::re2
+                                               nlohmann_json::nlohmann_json httplib::httplib
                                                GTest::gtest_main)
 target_compile_definitions(codesearch_tests PRIVATE
   EXPECTED_VERSION="${PROJECT_VERSION}"

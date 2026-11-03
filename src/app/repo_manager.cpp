@@ -260,7 +260,7 @@ UpdateResult RepoManager::update(const std::string& name, bool rebuild) {
 
     const RepoEntry* found = registry.find(name);
     if (found == nullptr) {
-        throw std::runtime_error("no repo named " + name);
+        throw UnknownRepoError("no repo named " + name);
     }
     RepoEntry entry = *found;
 
@@ -350,7 +350,7 @@ RepoEntry RepoManager::remove(const std::string& name) {
 
     const RepoEntry* found = registry.find(name);
     if (found == nullptr) {
-        throw std::runtime_error("no repo named " + name);
+        throw UnknownRepoError("no repo named " + name);
     }
     const RepoEntry removed = *found;
     std::erase_if(registry.repos, [&](const RepoEntry& repo) {
@@ -410,11 +410,57 @@ std::unique_ptr<ShardReader> openIndex(const Workspace& workspace, const RepoEnt
     return reader;
 }
 
+// openIndex, through `cache` if there is one. A file that went away is
+// never kept, so it can be opened again when it comes back.
+std::shared_ptr<ShardReader> openCached(const Workspace& workspace, const RepoEntry& repo,
+                                        bool mayBeGone, IndexCache* cache) {
+    if (cache == nullptr) {
+        return openIndex(workspace, repo, mayBeGone);
+    }
+    bool wentAway = false;
+    std::shared_ptr<ShardReader> reader;
+    try {
+        reader = cache->get(workspace.indexesDir() / repo.index.file, [&] {
+            std::unique_ptr<ShardReader> opened = openIndex(workspace, repo, mayBeGone);
+            if (opened == nullptr) {
+                // The cache can't keep "nothing", so stop it with an exception
+                // and catch it right below.
+                wentAway = true;
+                throw std::runtime_error("index file went away");
+            }
+            return opened;
+        });
+    } catch (...) {
+        if (wentAway) {
+            return nullptr;
+        }
+        throw;
+    }
+    // A file opened earlier was checked against the registry then. The
+    // registry may have been read again since, so check it once more.
+    if (!matchesRegistry(*reader, repo.index)) {
+        throw RepoIndexError(repo.name,
+                             "the index file doesn't match the registry" + rebuildHint(repo.name));
+    }
+    return reader;
+}
+
+// Closes the files in `cache` that `registry` no longer names: they were
+// replaced by an update, or their repo was removed.
+void forgetReplacedFiles(const Workspace& workspace, const Registry& registry, IndexCache& cache) {
+    std::vector<std::filesystem::path> current;
+    current.reserve(registry.repos.size());
+    for (const RepoEntry& repo : registry.repos) {
+        current.push_back(workspace.indexesDir() / repo.index.file);
+    }
+    cache.forgetOthers(current);
+}
+
 // Throws if `query` names a repo (repo:x) that isn't added.
 void checkReposExist(const Registry& registry, const QueryNode& query) {
     for (const std::string& name : repoNamesIn(query)) {
         if (registry.find(name) == nullptr) {
-            throw std::runtime_error("no repo named " + name);
+            throw UnknownRepoError("no repo named " + name);
         }
     }
 }
@@ -422,7 +468,7 @@ void checkReposExist(const Registry& registry, const QueryNode& query) {
 }  // namespace
 
 std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query,
-                                std::vector<RepoIndexError>* damaged) {
+                                std::vector<RepoIndexError>* damaged, IndexCache* cache) {
     // An index file goes away when an update replaces it after we read the
     // registry. Then the registry is read again, a few times, since more
     // updates can finish in between.
@@ -430,6 +476,9 @@ std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& que
     for (int attempt = 1;; ++attempt) {
         const Registry registry = loadRegistry(workspace);
         checkReposExist(registry, query);
+        if (cache != nullptr) {
+            forgetReplacedFiles(workspace, registry, *cache);
+        }
 
         std::vector<OpenRepo> opened;
         std::vector<RepoIndexError> damagedHere;  // this attempt's, kept if it's the last
@@ -438,9 +487,9 @@ std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& que
             if (resolveRepo(query, repo.name) == constant(false)) {
                 continue;  // nothing in this repo can match
             }
-            std::unique_ptr<ShardReader> reader;
+            std::shared_ptr<ShardReader> reader;
             try {
-                reader = openIndex(workspace, repo, attempt < kAttempts);
+                reader = openCached(workspace, repo, attempt < kAttempts, cache);
             } catch (const RepoIndexError& error) {
                 if (damaged == nullptr) {
                     throw;

@@ -1,3 +1,4 @@
+#include <pthread.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -13,10 +14,12 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "codesearch/app/index_commit.hpp"
 #include "codesearch/app/repo_manager.hpp"
+#include "codesearch/app/search_service.hpp"
 #include "codesearch/git/git_runner.hpp"
 #include "codesearch/index/index_file_error.hpp"
 #include "codesearch/index/shard_reader.hpp"
@@ -26,6 +29,7 @@
 #include "codesearch/search/repo_search.hpp"
 #include "codesearch/util/utf8.hpp"
 #include "codesearch/version.hpp"
+#include "http_server.hpp"
 
 namespace {
 
@@ -39,6 +43,7 @@ void printUsage(std::ostream& out) {
            "  code-search remove <name>\n"
            "  code-search search [options] [--] <query>\n"
            "  code-search verify <name>\n"
+           "  code-search serve [--port <n>] [--ui <folder>]\n"
            "  code-search --version\n"
            "  code-search --help\n"
            "\n"
@@ -435,39 +440,41 @@ public:
     InterruptHandler& operator=(InterruptHandler&&) = delete;
 };
 
-// Runs the search and prints the results, as text or into `json`. Sets
-// `found` if there was any.
-SearchStatus printResults(std::span<const SearchTarget> targets, const SearchRequest& request,
-                          const SearchArgs& args, JsonResultWriter* json, bool& found) {
-    // On a terminal, a file's bytes could send it commands (like ESC
-    // sequences), so they're escaped. Colors mean a terminal too, maybe
-    // behind a pager like `less -R`. Into a pipe or file, bytes stay as
-    // they are, for other programs to read.
-    const Colors colors = pickColors(args.color);
-    const bool escape = ::isatty(STDOUT_FILENO) == 1 || !colors.reset.empty();
-    TextPrinter text(args.contextLines, colors, escape);
+// Prints each result file, as text or into `json`, and sets `found`.
+class ResultPrinter {
+public:
+    ResultPrinter(const SearchArgs& args, JsonResultWriter* json)
+        : json_(json),
+          colors_(pickColors(args.color)),
+          // On a terminal, a file's bytes could send it commands (like ESC
+          // sequences), so they're escaped. Colors mean a terminal too, maybe
+          // behind a pager like `less -R`. Into a pipe or file, bytes stay as
+          // they are, for other programs to read.
+          text_(args.contextLines, colors_,
+                ::isatty(STDOUT_FILENO) == 1 || !colors_.reset.empty()) {}
 
-    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
-        found = true;
-        if (json != nullptr) {
-            json->file(file);
+    void file(const ResultFile& file) {
+        found_ = true;
+        if (json_ != nullptr) {
+            json_->file(file);
         } else {
-            text.file(file);
+            text_.file(file);
         }
         // The reader went away (like `| head` after enough lines): stop
         // now instead of searching on for output nobody reads.
         if (!std::cout) {
             throw std::runtime_error("could not write the output");
         }
-    });
-    if (json != nullptr) {
-        json->finish(status);
-    } else if (status == SearchStatus::Truncated) {
-        std::cerr << "code-search: stopped after " << args.maxResults
-                  << " results (--max-results); there are more\n";
     }
-    return status;
-}
+
+    bool found() const { return found_; }
+
+private:
+    JsonResultWriter* json_;
+    Colors colors_;
+    TextPrinter text_;
+    bool found_ = false;
+};
 
 // A repo left out of the search because its index is damaged: says so on
 // stderr, and in the JSON. The search goes on with the other repos.
@@ -476,41 +483,6 @@ void reportSkipped(const std::string& repo, const std::string& message, JsonResu
     if (json != nullptr) {
         json->skipped(repo, message);
     }
-}
-
-// Opens the added repos `request` could match. A damaged one is skipped
-// with a warning, both here and if the search finds damage later
-// (request.onDamaged). If no repo is left to search, that's an error.
-std::vector<OpenRepo> openAddedRepos(SearchRequest& request, JsonResultWriter* json) {
-    const Workspace workspace(Workspace::defaultRoot());
-    if (loadRegistry(workspace).repos.empty()) {
-        throw std::runtime_error("no repos added yet. Add one with: code-search add <folder>");
-    }
-    std::vector<RepoIndexError> damaged;
-    std::vector<OpenRepo> repos = openRepos(workspace, request.query, &damaged);
-    if (repos.empty() && !damaged.empty()) {
-        // Every repo the query could match is damaged: nothing to search.
-        std::string message = damaged[0].what();
-        for (std::size_t i = 1; i < damaged.size(); ++i) {
-            message += "\n" + std::string(damaged[i].what());
-        }
-        throw IndexFileError(message);
-    }
-    for (const RepoIndexError& error : damaged) {
-        reportSkipped(error.repo(), error.what(), json);
-    }
-    // Damage found during the search skips the rest of that repo too,
-    // unless it's the last repo left: then it's an error, as above.
-    // `mutable` lets the lambda change its own copy of `left`.
-    request.onDamaged = [json, left = repos.size()](const RepoIndexError& error) mutable {
-        const std::string message = error.what() + rebuildHint(error.repo());
-        --left;
-        if (left == 0) {
-            throw IndexFileError(message);
-        }
-        reportSkipped(error.repo(), message, json);
-    };
-    return repos;
 }
 
 // Ctrl-C stopped the command: says so, and ends the JSON document.
@@ -522,60 +494,90 @@ int reportCancelled(JsonResultWriter* json) {
     return 130;  // what shells use for "stopped by Ctrl-C"
 }
 
-// The search command, once its arguments are read. With --json, everything
-// goes into `json`; runSearch ends the document if this throws.
-int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
-    // From here on, Ctrl-C stops the command cleanly, even while --path
-    // is still indexing.
-    const InterruptHandler interrupts;
+// Ends the output once the search is done, and picks the exit code.
+int finishSearch(SearchStatus status, const SearchArgs& args, const ResultPrinter& printer,
+                 JsonResultWriter* json) {
+    if (status == SearchStatus::Cancelled) {
+        return reportCancelled(json);
+    }
+    if (json != nullptr) {
+        json->finish(status);
+    } else if (status == SearchStatus::Truncated) {
+        std::cerr << "code-search: stopped after " << args.maxResults
+                  << " results (--max-results); there are more\n";
+    }
+    return printer.found() ? 0 : 1;  // like grep: 1 means nothing found
+}
+
+// Searches a repo that isn't added (--path): indexes it in memory first.
+int searchFolder(const SearchArgs& args, JsonResultWriter* json) {
     const ParsedQuery parsed = parseQuery(args.query);
-    SearchRequest request{
+    if (!repoNamesIn(parsed.root).empty()) {
+        throw QueryError("repo: only works on added repos, not with --path");
+    }
+    // Files are checked on several threads; results still come out in order.
+    const std::unique_ptr<ThreadPool> pool = startPool();
+    const SearchRequest request{
         .query = parsed.root,
         .options = {.caseSensitive = parsed.caseSensitive.value_or(args.caseSensitive)},
         .maxResults = args.maxResults,
         .contextLines = args.contextLines,
         .filesOnly = args.filesOnly,
         .cancelled = &gCancelled,
+        .pool = pool.get(),
     };
+    std::optional<BuiltRepo> built;
+    try {
+        built = buildRepo(args.repoPath, FileFilter(), pool.get(), &gCancelled);
+    } catch (...) {
+        // Ctrl-C also stops Git, which indexing then sees as an error.
+        if (!gCancelled) {
+            throw;
+        }
+        return reportCancelled(json);
+    }
+    const std::vector<SearchTarget> targets = {{.name = "", .index = &built->built.index}};
+    ResultPrinter printer(args, json);
+    const SearchStatus status = searchRepos(targets, request, [&](const ResultFile& file) {
+        printer.file(file);
+    });
+    return finishSearch(status, args, printer, json);
+}
 
-    // Files are checked on several threads; results still come out in order.
-    const std::unique_ptr<ThreadPool> pool = startPool();
-    request.pool = pool.get();
-
-    std::vector<SearchTarget> targets;
-    std::optional<BuiltRepo> built;  // with --path
-    std::vector<OpenRepo> repos;     // otherwise
+// The search command, once its arguments are read. With --json, everything
+// goes into `json`; runSearch ends the document if this throws.
+int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
+    // From here on, Ctrl-C stops the command cleanly, even while --path
+    // is still indexing.
+    const InterruptHandler interrupts;
     if (!args.repoPath.empty()) {
-        if (!repoNamesIn(request.query).empty()) {
-            throw QueryError("repo: only works on added repos, not with --path");
-        }
-        try {
-            built = buildRepo(args.repoPath, FileFilter(), pool.get(), &gCancelled);
-        } catch (...) {
-            // Ctrl-C also stops Git, which indexing then sees as an error.
-            if (!gCancelled) {
-                throw;
-            }
-            return reportCancelled(json);
-        }
-        targets.push_back({.name = "", .index = &built->built.index});
-    } else {
-        if (!args.repoName.empty()) {
-            request.query = allOf({repoFilter(args.repoName), request.query});
-        }
-        repos = openAddedRepos(request, json);
-        for (const OpenRepo& repo : repos) {
-            targets.push_back({.name = repo.name, .index = repo.index.get()});
-        }
+        return searchFolder(args, json);
     }
 
-    bool found = false;
-    const SearchStatus status = printResults(targets, request, args, json, found);
-    if (status == SearchStatus::Cancelled) {
-        std::cerr << "code-search: cancelled\n";
-        return 130;
-    }
-    return found ? 0 : 1;  // like grep: 1 means nothing found
+    const std::unique_ptr<ThreadPool> pool = startPool();
+    const SearchService service(Workspace(Workspace::defaultRoot()), pool.get(), nullptr);
+    PreparedSearch search = service.prepare({
+        .query = args.query,
+        .repo = args.repoName,
+        .caseSensitive = args.caseSensitive,
+        .maxResults = args.maxResults,
+        .contextLines = args.contextLines,
+        .filesOnly = args.filesOnly,
+    });
+    ResultPrinter printer(args, json);
+    const SearchStatus status =
+        SearchService::run(search, &gCancelled,
+                           {
+                               .onFile =
+                                   [&](const ResultFile& file) {
+                                       printer.file(file);
+                                   },
+                               .onSkipped =
+                                   [json](const std::string& repo, const std::string& message) {
+                                       reportSkipped(repo, message, json);
+                                   },
+                           });
+    return finishSearch(status, args, printer, json);
 }
 
 // With --json, the output is one whole JSON document whatever happens:
@@ -725,6 +727,97 @@ int runVerify(const std::string& name) {
     }
 }
 
+struct ServeArgs {
+    int port = 7700;
+    std::filesystem::path uiDir = CODESEARCH_WEB_DIR;
+};
+
+// Reads the arguments after "serve".
+std::optional<ServeArgs> parseServeArgs(std::span<char*> args) {
+    ServeArgs result;
+    constexpr std::size_t kMaxPort = 65535;
+    for (std::size_t i = 0; i + 1 < args.size(); i += 2) {
+        const std::string_view arg = args[i];
+        const std::string_view value = args[i + 1];
+        if (arg == "--port") {
+            const std::optional<std::size_t> port = parseCount(value);
+            if (!port.has_value() || port.value() == 0 || port.value() > kMaxPort) {
+                return std::nullopt;
+            }
+            result.port = static_cast<int>(port.value());
+        } else if (arg == "--ui" && !value.empty()) {
+            result.uiDir = value;
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (args.size() % 2 != 0) {
+        return std::nullopt;  // an option without its value
+    }
+    return result;
+}
+
+// Runs the HTTP server until Ctrl-C (SIGINT) or SIGTERM.
+//
+// A signal handler may do very little, and stopping the server isn't
+// among it. So instead the signals are blocked in every thread, and this
+// thread waits for one with sigwait(), which takes it like a normal
+// function call. Then it can stop the server the usual way.
+int runServe(const ServeArgs& args) {
+    // A signal set to "ignore" is dropped before sigwait() could see it,
+    // and shells start background jobs with SIGINT ignored.
+    static_cast<void>(std::signal(SIGINT, SIG_DFL));
+    static_cast<void>(std::signal(SIGTERM, SIG_DFL));
+    sigset_t signals{};
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGINT);
+    sigaddset(&signals, SIGTERM);
+    // Threads started after this inherit the blocked signals.
+    pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+
+    HttpServer server({
+        .workspace = Workspace(Workspace::defaultRoot()),
+        .cloner = cloneShallow,
+        .uiDir = args.uiDir,
+    });
+    const int port = server.bind(args.port);
+    std::cerr << "code-search: serving http://127.0.0.1:" << port << " (Ctrl-C to stop)\n";
+
+    std::exception_ptr failure;  // an error from the server's thread, to throw here
+    std::thread serving([&] {
+        try {
+            server.run();
+        } catch (...) {
+            failure = std::current_exception();
+            // Wake the sigwait() below, so the program doesn't hang.
+            static_cast<void>(::kill(::getpid(), SIGTERM));
+        }
+    });
+    int signal = 0;
+    sigwait(&signals, &signal);
+    server.stop();
+    serving.join();
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+    std::cerr << "code-search: stopped\n";
+    return 0;
+}
+
+// The search command, given the arguments after "search".
+int searchCommand(std::span<char*> args) {
+    const std::optional<SearchArgs> searchArgs = parseSearchArgs(args);
+    if (searchArgs.has_value()) {
+        return runSearch(searchArgs.value());
+    }
+    // With --json, even bad arguments give one whole JSON document.
+    if (asksForJson(args)) {
+        JsonResultWriter(std::cout).fail("the arguments aren't valid. See: code-search --help");
+    }
+    printUsage(std::cerr);
+    return 2;
+}
+
 int run(std::span<char*> args) {
     if (args.size() == 2) {
         const std::string_view arg = args.back();
@@ -740,15 +833,9 @@ int run(std::span<char*> args) {
 
     const std::string_view command = args.size() >= 2 ? args[1] : "";
     if (command == "search") {
-        const std::optional<SearchArgs> searchArgs = parseSearchArgs(args.subspan(2));
-        if (searchArgs.has_value()) {
-            return runSearch(searchArgs.value());
-        }
-        // With --json, even bad arguments give one whole JSON document.
-        if (asksForJson(args.subspan(2))) {
-            JsonResultWriter(std::cout).fail("the arguments aren't valid. See: code-search --help");
-        }
-    } else if (command == "add") {
+        return searchCommand(args.subspan(2));
+    }
+    if (command == "add") {
         const std::optional<AddArgs> addArgs = parseAddArgs(args.subspan(2));
         if (addArgs.has_value()) {
             return runAdd(addArgs.value());
@@ -764,6 +851,11 @@ int run(std::span<char*> args) {
         return runRemove(args[2]);
     } else if (command == "verify" && args.size() == 3) {
         return runVerify(args[2]);
+    } else if (command == "serve") {
+        const std::optional<ServeArgs> serveArgs = parseServeArgs(args.subspan(2));
+        if (serveArgs.has_value()) {
+            return runServe(serveArgs.value());
+        }
     }
 
     printUsage(std::cerr);

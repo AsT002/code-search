@@ -33,6 +33,22 @@ FetchContent_Declare(re2
 )
 FetchContent_MakeAvailable(absl re2)
 
+# cpp-httplib for the HTTP server (M9). Header-only. Plain HTTP on
+# localhost, so none of its TLS or compression options are needed.
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_NON_BLOCKING_GETADDRINFO OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(httplib
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.64.0.tar.gz
+  URL_HASH SHA256=1ada413782af5e67e80452c39b7c90beb6fa4fc8341e18c0896bf95684b9a620
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+  SYSTEM
+)
+FetchContent_MakeAvailable(httplib)
+
 if(CODESEARCH_BUILD_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   set(BUILD_GMOCK ON CACHE BOOL "" FORCE)

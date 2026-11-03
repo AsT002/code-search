@@ -3,10 +3,12 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "codesearch/app/index_cache.hpp"
 #include "codesearch/app/index_commit.hpp"
 #include "codesearch/index/shard_reader.hpp"
 #include "codesearch/query/ast.hpp"
@@ -15,6 +17,12 @@
 #include "codesearch/search/repo_search.hpp"
 
 namespace codesearch {
+
+// Thrown when a name, or a repo: filter, names a repo that isn't added.
+class UnknownRepoError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // Clones a GitHub repo into a folder. The real one is cloneShallow; tests
 // pass their own, so they don't need the network.
@@ -96,7 +104,9 @@ Registry loadRegistry(const Workspace& workspace);
 
 struct OpenRepo {
     std::string name;
-    std::unique_ptr<ShardReader> index;  // a pointer, because ShardReader can't be moved
+    // A pointer, because ShardReader can't be moved. Shared, because an
+    // IndexCache may keep the same file open for other searches too.
+    std::shared_ptr<ShardReader> index;
 };
 
 // Opens the current index of each repo `query` could match in, sorted by
@@ -104,12 +114,16 @@ struct OpenRepo {
 // "repo:a foo" opens only a. Doesn't take the lock, so it works while a
 // change runs. If an index file was deleted between reading the registry and
 // opening the file, the registry changed: read it again and retry, a few
-// times. Throws std::runtime_error if the query names a repo that isn't
+// times. Throws UnknownRepoError if the query names a repo that isn't
 // added. If an index is damaged or doesn't match the registry
 // (matchesRegistry), the error is a RepoIndexError naming the repo, with how
 // to rebuild it. With `damaged`, the repo is left out and the error added
 // there; without it, the error is thrown.
+//
+// With `cache`, files already open there are used as they are, new ones
+// are kept there, and files the registry no longer names are closed.
 std::vector<OpenRepo> openRepos(const Workspace& workspace, const QueryNode& query,
-                                std::vector<RepoIndexError>* damaged = nullptr);
+                                std::vector<RepoIndexError>* damaged = nullptr,
+                                IndexCache* cache = nullptr);
 
 }  // namespace codesearch

@@ -37,8 +37,10 @@ include(Dependencies)  # each one is only fetched when something needs it
 
 # Core library
 add_library(codesearch_core
+  src/app/index_cache.cpp
   src/app/index_commit.cpp
   src/app/repo_manager.cpp
+  src/app/search_service.cpp
   src/git/git_repo.cpp
   src/git/git_runner.cpp
   src/index/file_filter.cpp
@@ -80,9 +82,20 @@ target_compile_definitions(codesearch_core PRIVATE CODESEARCH_VERSION="${PROJECT
 codesearch_set_warnings(codesearch_core)
 codesearch_set_clang_tidy(codesearch_core)
 
+# HTTP server, used by `code-search serve`
+add_library(codesearch_server server/http_server.cpp)
+target_include_directories(codesearch_server PUBLIC server)
+target_link_libraries(codesearch_server PUBLIC codesearch_core
+                      PRIVATE httplib::httplib nlohmann_json::nlohmann_json)
+codesearch_set_warnings(codesearch_server)
+codesearch_set_clang_tidy(codesearch_server)
+
 # CLI
 add_executable(code-search cli/main.cpp)
-target_link_libraries(code-search PRIVATE codesearch_core)
+target_link_libraries(code-search PRIVATE codesearch_server)  # brings codesearch_core too
+# Where `serve` looks for the built web UI by default.
+target_compile_definitions(code-search PRIVATE
+  CODESEARCH_WEB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/web/dist")
 codesearch_set_warnings(code-search)
 codesearch_set_clang_tidy(code-search)
 
