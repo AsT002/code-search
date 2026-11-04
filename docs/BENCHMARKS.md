@@ -16,6 +16,11 @@ with tools built the same way, and it has to include what the index costs.
   limits raised: by default zoekt stops after 100,000 matches per shard, then
   ranks, so it doesn't return every match the way the others do.
 
+livegrep, another indexed tool, isn't included: it builds with Bazel, which
+wasn't set up on this machine, and its build often fails on macOS. Its index
+is a suffix array rather than trigrams, so it would be a comparison worth
+adding on Linux.
+
 Setup: Apple M4 (10 cores), 16 GiB, macOS, release build, warm file cache,
 load average about 2. 7 runs of each command, the tools taking turns. Two
 sets of files: the Linux kernel fork ripgrep's benchsuite uses
