@@ -2,36 +2,69 @@
 // React text node, which React escapes, so file content can never become
 // HTML. Nothing here may use dangerouslySetInnerHTML.
 
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 
 import type { ResultFile, ResultLine, SearchResponse } from "./api";
-import { lineBytes, segments } from "./highlight";
+import { lineBytes, segments, type Segment } from "./highlight";
+import { highlightLines, languageFor, paint, type PaintedSegment } from "./syntax";
 
-function LineView({ line }: { line: ResultLine }) {
+function LineView({ line, painted }: { line: ResultLine; painted: PaintedSegment[] }) {
   const isMatch = line.matches.length > 0;
   return (
     <div className={isMatch ? "line match-line" : "line context-line"}>
       <span className="line-number">{line.line}</span>
       <code className="line-text">
-        {segments(lineBytes(line), line.matches).map((segment, i) =>
-          segment.match ? <mark key={i}>{segment.text}</mark> : <span key={i}>{segment.text}</span>,
-        )}
+        {painted.map((segment, i) => {
+          const tokens = segment.tokens.map((token, k) => (
+            <span key={k} className={token.classes.length > 0 ? token.classes.join(" ") : undefined}>
+              {token.text}
+            </span>
+          ));
+          return segment.match ? <mark key={i}>{tokens}</mark> : <span key={i}>{tokens}</span>;
+        })}
       </code>
     </div>
   );
 }
 
+// Each line's match segments, with syntax colors inside them. Lines that
+// follow each other in the file are colored as one block.
+function paintLines(file: ResultFile): PaintedSegment[][] {
+  const language = languageFor(file.path);
+  const out: PaintedSegment[][] = [];
+  let block: Segment[][] = []; // the match segments of each line in this block
+  let previous = 0;
+  const finishBlock = () => {
+    const tokens = highlightLines(
+      language,
+      block.map((pieces) => pieces.map((piece) => piece.text).join("")),
+    );
+    block.forEach((pieces, i) => out.push(paint(pieces, tokens[i] ?? [])));
+    block = [];
+  };
+  for (const line of file.lines) {
+    if (block.length > 0 && line.line !== previous + 1) {
+      finishBlock();
+    }
+    block.push(segments(lineBytes(line), line.matches));
+    previous = line.line;
+  }
+  finishBlock();
+  return out;
+}
+
 export function FileResult({ file }: { file: ResultFile }) {
+  const painted = useMemo(() => paintLines(file), [file]);
   const rows: ReactNode[] = [];
   let previous = 0;
-  for (const line of file.lines) {
+  file.lines.forEach((line, i) => {
     // A gap between groups of lines that aren't next to each other.
     if (previous !== 0 && line.line > previous + 1) {
       rows.push(<div key={`gap-${line.line}`} className="gap" aria-hidden="true" />);
     }
-    rows.push(<LineView key={line.line} line={line} />);
+    rows.push(<LineView key={line.line} line={line} painted={painted[i] ?? []} />);
     previous = line.line;
-  }
+  });
   return (
     <section className="file">
       <h2 className="file-name">

@@ -8,6 +8,14 @@
   --accent: #0969da;
   --error: #cf222e;
   --warning: #9a6700;
+  /* Syntax colors, after GitHub's. */
+  --syntax-keyword: #cf222e;
+  --syntax-string: #0a3069;
+  --syntax-comment: #6e7781;
+  --syntax-number: #0550ae;
+  --syntax-title: #8250df;
+  --syntax-type: #953800;
+  --syntax-tag: #116329;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
@@ -23,6 +31,13 @@
     --accent: #4493f8;
     --error: #f85149;
     --warning: #d29922;
+    --syntax-keyword: #ff7b72;
+    --syntax-string: #a5d6ff;
+    --syntax-comment: #8b949e;
+    --syntax-number: #79c0ff;
+    --syntax-title: #d2a8ff;
+    --syntax-type: #ffa657;
+    --syntax-tag: #7ee787;
   }
 }
 
@@ -154,7 +169,7 @@ h1 {
 }
 
 .context-line .line-text {
-  color: var(--muted);
+  opacity: 0.7;
 }
 
 .line-text {
@@ -181,4 +196,64 @@ mark {
 .help code {
   color: var(--fg);
   margin-right: 8px;
+}
+
+/* Syntax highlighting: classes from highlight.js (see syntax.ts). */
+.hljs-keyword,
+.hljs-doctag,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-variable.language_ {
+  color: var(--syntax-keyword);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-meta .hljs-string {
+  color: var(--syntax-string);
+}
+
+.hljs-comment,
+.hljs-code,
+.hljs-formula {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-attr,
+.hljs-attribute,
+.hljs-symbol,
+.hljs-variable,
+.hljs-selector-attr,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-operator,
+.hljs-meta {
+  color: var(--syntax-number);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+  color: var(--syntax-title);
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-title.class_ {
+  color: var(--syntax-type);
+}
+
+.hljs-name,
+.hljs-tag,
+.hljs-selector-tag,
+.hljs-quote,
+.hljs-addition {
+  color: var(--syntax-tag);
+}
+
+.hljs-deletion {
+  color: var(--syntax-keyword);
 }

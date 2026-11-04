@@ -857,7 +857,10 @@ Requests a web page on another site could send are turned away:
 - The reader treats index files as untrusted. See "Checking index files".
 - The HTTP server listens on 127.0.0.1 only and turns away requests a page on
   another site could send (see "HTTP API"). The web UI renders file content as
-  text, never as HTML.
+  text, never as HTML. Syntax colors come from highlight.js through lowlight,
+  which gives a tree of tokens, not HTML, so they're text too. A block of
+  lines over 50,000 characters is shown plain, so a huge minified line can't
+  freeze the page.
 
 ## Decisions
 
@@ -984,4 +987,4 @@ with the planner; otherwise a planner bug would hide itself.
 | Fuzzing | Opening and reading damaged index files; the query parser with deep nesting and long input. We keep the inputs that found bugs |
 | Sanitizers | ASan and UBSan, and TSan for the threaded search and build (`asan` and `tsan` presets) |
 | HTTP server | The same document as `search --json`, byte for byte, for finished searches and for errors before the search starts. Cancelling when the client goes away, the time limit, an update deleting the index file a search has open, searches at the same time, and requests from other sites turned away |
-| Web UI | `npm test` in `web/`: byte offsets to highlights (non-ASCII, cut characters, invalid UTF-8), and that file content, paths and messages come out escaped |
+| Web UI | `npm test` in `web/`: byte offsets to highlights (non-ASCII, cut characters, invalid UTF-8), syntax colors (by file name, across lines, cut at match edges), and that file content, paths and messages come out escaped |

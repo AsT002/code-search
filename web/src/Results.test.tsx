@@ -20,7 +20,10 @@ describe("escaping", () => {
     const html = renderToStaticMarkup(<FileResult file={file} />);
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<img");
-    expect(html).toContain("<mark>&lt;script&gt;</mark>");
+    // The match is marked, with HTML's syntax colors inside it, all as text.
+    expect(html).toMatch(/<mark>(<span[^>]*>[^<]*<\/span>)+<\/mark>/);
+    expect(html.replace(/<[^>]*>/g, "")).toContain("and &lt;script&gt;alert(1)&lt;/script&gt; &amp;amp;");
+    expect(html).toContain('class="hljs-tag"');
     expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;.html");
     expect(html).toContain("&amp;amp;");
   });
@@ -42,6 +45,21 @@ describe("escaping", () => {
 });
 
 describe("results", () => {
+  test("colors code by its file's language, with matches still marked", () => {
+    const file: ResultFile = {
+      repo: "r",
+      path: "main.go",
+      lines: [
+        { line: 1, text: "/* a", matches: [] },
+        { line: 2, text: "b */ func target() {}", matches: [{ start: 10, end: 16 }] },
+      ],
+    };
+    const html = renderToStaticMarkup(<FileResult file={file} />);
+    expect(html).toContain('<span class="hljs-comment">b */</span>');
+    expect(html).toContain('<span class="hljs-function hljs-keyword">func</span>');
+    expect(html).toContain('<mark><span class="hljs-function hljs-title">target</span></mark>');
+  });
+
   test("marks a gap between lines that aren't next to each other", () => {
     const file: ResultFile = {
       repo: "",
