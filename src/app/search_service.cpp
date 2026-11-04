@@ -1,8 +1,10 @@
 #include "codesearch/app/search_service.hpp"
 
+#include <string_view>
 #include <utility>
 
 #include "codesearch/index/index_file_error.hpp"
+#include "codesearch/index/shard_reader.hpp"
 #include "codesearch/query/parser.hpp"
 #include "codesearch/query/planner.hpp"
 
@@ -44,6 +46,27 @@ PreparedSearch SearchService::prepare(const SearchSettings& settings) const {
         throw IndexFileError(message);
     }
     return search;
+}
+
+std::optional<ResultFile> SearchService::readFile(const std::string& repo,
+                                                  const std::string& path) const {
+    // repo:<name> opens only that repo, and throws if it isn't added.
+    const std::vector<OpenRepo> repos = openRepos(workspace_, repoFilter(repo), nullptr, cache_);
+    for (const OpenRepo& open : repos) {
+        const ShardReader& index = *open.index;
+        // Each file is looked at once, which is quick next to reading it.
+        for (DocId doc = 0; doc < index.docCount(); ++doc) {
+            if (index.path(doc) != path) {
+                continue;
+            }
+            ResultFile file{.repo = open.name, .path = path, .lines = {}};
+            index.withContent(doc, [&file](std::string_view content) {
+                file.lines = allLines(content);
+            });
+            return file;
+        }
+    }
+    return std::nullopt;
 }
 
 SearchStatus SearchService::run(PreparedSearch& search, const std::atomic<bool>* cancelled,

@@ -107,3 +107,19 @@ export async function listRepos(): Promise<Repo[]> {
   }
   return (body as { repos: Repo[] }).repos;
 }
+
+// One whole file, as it was indexed: every line, with no matches. Throws
+// an Error with the server's message if it can't be shown.
+export async function fetchFile(repo: string, path: string, signal: AbortSignal): Promise<ResultFile> {
+  const response = await fetch(`/api/v1/file?${new URLSearchParams({ repo, path }).toString()}`, { signal });
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error(`the server answered ${response.status}`);
+  }
+  if (!response.ok) {
+    throw new Error(errorMessage(body, response.statusText));
+  }
+  return body as ResultFile;
+}

@@ -2,7 +2,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 
 import type { ResultFile, SearchResponse } from "./api";
-import { FileResult, Results, resultCount } from "./Results";
+import { FileResult, LineView, Results, resultCount, type LinkFor } from "./Results";
+
+// Links like the app makes, without its navigation.
+const linkFor: LinkFor = (open) => ({
+  href: `?file=${encodeURIComponent(open.path)}&line=${open.line ?? ""}`,
+  onClick: () => undefined,
+});
 
 describe("escaping", () => {
   test("file content and paths never become HTML", () => {
@@ -73,6 +79,31 @@ describe("results", () => {
     const html = renderToStaticMarkup(<FileResult file={file} />);
     expect(html.match(/class="gap"/g)?.length).toBe(1);
     expect(html).not.toContain("repo-name"); // no repo for --path searches
+  });
+
+  test("links the file and each line", () => {
+    const file: ResultFile = {
+      repo: "r",
+      path: "a.txt",
+      lines: [{ line: 7, text: "x", matches: [{ start: 0, end: 1 }] }],
+    };
+    const html = renderToStaticMarkup(<FileResult file={file} linkFor={linkFor} />);
+    expect(html).toContain('<a class="path" href="?file=a.txt&amp;line=">a.txt</a>');
+    expect(html).toContain('<a class="line-number" href="?file=a.txt&amp;line=7">7</a>');
+    // Without links, nothing is a link.
+    expect(renderToStaticMarkup(<FileResult file={file} />)).not.toContain("<a ");
+  });
+
+  test("a path that isn't valid UTF-8 gets no link", () => {
+    const file: ResultFile = { repo: "r", path: "a\uFFFD.txt", path_base64: "YYAudHh0", lines: [] };
+    expect(renderToStaticMarkup(<FileResult file={file} linkFor={linkFor} />)).not.toContain("<a ");
+  });
+
+  test("a line in a file view can be picked and scrolled to", () => {
+    const html = renderToStaticMarkup(
+      <LineView line={{ line: 3, text: "y", matches: [] }} painted={[]} fadeContext={false} selected anchor />,
+    );
+    expect(html).toContain('class="line selected-line" id="L3"');
   });
 
   test("counts results the way the limit does", () => {

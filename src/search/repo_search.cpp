@@ -170,6 +170,23 @@ std::vector<ResultLine> resultLines(std::string_view content, std::span<const Ma
     return out;
 }
 
+std::vector<ResultLine> allLines(std::string_view content) {
+    std::vector<ResultLine> out;
+    if (content.empty()) {
+        return out;
+    }
+    std::size_t start = 0;
+    for (std::size_t number = 1;; ++number) {
+        std::size_t after = 0;
+        const std::string_view text = lineAt(content, start, after);
+        out.push_back({.number = number, .text = std::string(text), .matches = {}});
+        if (after == std::string_view::npos) {
+            return out;
+        }
+        start = after;
+    }
+}
+
 namespace {
 
 // Turns one matching file into a result and passes it to onFile, keeping to

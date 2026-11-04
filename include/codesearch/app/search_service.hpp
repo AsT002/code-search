@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -76,6 +77,12 @@ public:
     // nothing from the service: `search` holds it all.
     static SearchStatus run(PreparedSearch& search, const std::atomic<bool>* cancelled,
                             const SearchEvents& events);
+
+    // The whole of one file, as it was indexed, with every line and no
+    // matches. Nothing if the repo has no indexed file at `path`. Throws
+    // UnknownRepoError if `repo` isn't added, and IndexFileError (often a
+    // RepoIndexError) if its index is damaged.
+    std::optional<ResultFile> readFile(const std::string& repo, const std::string& path) const;
 
 private:
     Workspace workspace_;

@@ -370,6 +370,7 @@ private:
     void search(const httplib::Request& req, httplib::Response& res);
     void streamSearch(PreparedSearch& search, const std::function<bool()>& connectionClosed,
                       httplib::DataSink& sink);
+    void showFile(const httplib::Request& req, httplib::Response& res) const;
     void listRepos(httplib::Response& res) const;
     void addRepo(const httplib::Request& req, httplib::Response& res) const;
     void updateRepo(const httplib::Request& req, httplib::Response& res) const;
@@ -446,6 +447,9 @@ void HttpServer::Impl::setUp() {
     });
     server_.Get("/api/v1/search", [this](const httplib::Request& req, httplib::Response& res) {
         search(req, res);
+    });
+    server_.Get("/api/v1/file", [this](const httplib::Request& req, httplib::Response& res) {
+        showFile(req, res);
     });
     server_.Get("/api/v1/repos", [this](const httplib::Request& /*req*/, httplib::Response& res) {
         listRepos(res);
@@ -631,6 +635,42 @@ void HttpServer::Impl::streamSearch(PreparedSearch& search,
 }
 
 // GET /api/v1/repos: {"repos":[{"name":...,"source":...,"location":...,"commit":...}]}
+// GET /api/v1/file?repo=<name>&path=<path>: one whole file, as it was
+// indexed, in the format of an entry of a search's "files".
+void HttpServer::Impl::showFile(const httplib::Request& req, httplib::Response& res) const {
+    for (const auto& [key, value] : req.params) {
+        if (key != "repo" && key != "path") {
+            sendError(res, 400, "bad_request", "unknown parameter " + key);
+            return;
+        }
+    }
+    if (req.get_param_value_count("repo") != 1 || req.get_param_value_count("path") != 1) {
+        sendError(res, 400, "bad_request", "give repo and path, once each");
+        return;
+    }
+    const std::string repo = req.get_param_value("repo");
+    const std::string path = req.get_param_value("path");
+    if (repo.empty()) {
+        sendError(res, 400, "bad_request", "repo can't be empty");
+        return;
+    }
+    try {
+        const std::optional<ResultFile> file = service_.readFile(repo, path);
+        if (!file.has_value()) {
+            sendError(res, 404, "not_found", repo + " has no indexed file " + path);
+            return;
+        }
+        res.status = 200;
+        res.set_content(resultFileJson(file.value()) + "\n", "application/json");
+    } catch (const UnknownRepoError& error) {
+        sendError(res, 404, "unknown_repo", error.what());
+    } catch (const RepoIndexError& error) {
+        sendError(res, 500, "damaged", error.what() + rebuildHint(error.repo()));
+    } catch (const std::exception& error) {
+        sendError(res, 500, "internal", error.what());
+    }
+}
+
 void HttpServer::Impl::listRepos(httplib::Response& res) const {
     Json repos = Json::array();
     for (const RepoEntry& repo : loadRegistry(config_.workspace).repos) {

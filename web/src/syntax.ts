@@ -12,8 +12,9 @@ import type { Segment } from "./highlight";
 // The ~37 common languages: C, C++, Go, Rust, Python, JS, TS, Java, ...
 const lowlight = createLowlight(common);
 
-// Longer blocks are shown plain: highlighting is regex based and runs on
-// the page's only thread, so a huge minified line could freeze it.
+// Code is colored in pieces of at most this many characters, and a longer
+// line is shown plain: highlighting is regex based and runs on the page's
+// only thread, so a huge minified line could freeze it.
 const MAX_CHARS = 50_000;
 
 // A piece of a line, and its highlight.js classes, like ["hljs-keyword"].
@@ -60,14 +61,43 @@ function classesOf(node: ElementContent): string[] {
 
 // Highlights lines that follow each other in the file as one block, so a
 // comment or string that spans lines is colored right, and gives back each
-// line's tokens. Lines without a language, or too long, are one plain token.
+// line's tokens. A long block, like a whole file, is colored in pieces of
+// up to MAX_CHARS. Lines without a language, or longer than that on their
+// own, are one plain token.
 export function highlightLines(language: string | undefined, lines: string[]): Token[][] {
-  const plain = () => lines.map((text) => [{ text, classes: [] }]);
-  const code = lines.join("\n");
-  if (language === undefined || code.length > MAX_CHARS) {
-    return plain();
+  const plainLine = (text: string): Token[] => [{ text, classes: [] }];
+  if (language === undefined) {
+    return lines.map(plainLine);
   }
+  const out: Token[][] = [];
+  let piece: string[] = [];
+  let size = 0;
+  const finishPiece = () => {
+    if (piece.length > 0) {
+      out.push(...highlightPiece(language, piece));
+    }
+    piece = [];
+    size = 0;
+  };
+  for (const line of lines) {
+    if (line.length > MAX_CHARS) {
+      finishPiece();
+      out.push(plainLine(line));
+      continue;
+    }
+    if (size + line.length + 1 > MAX_CHARS) {
+      finishPiece();
+    }
+    piece.push(line);
+    size += line.length + 1;
+  }
+  finishPiece();
+  return out;
+}
 
+// Colors lines of at most MAX_CHARS in all, as one piece of code.
+function highlightPiece(language: string, lines: string[]): Token[][] {
+  const plain = () => lines.map((text) => [{ text, classes: [] }]);
   let current: Token[] = [];
   const out: Token[][] = [current];
   const walk = (nodes: RootContent[] | ElementContent[], classes: string[]) => {
@@ -89,7 +119,7 @@ export function highlightLines(language: string | undefined, lines: string[]): T
     }
   };
   try {
-    walk(lowlight.highlight(language, code).children, []);
+    walk(lowlight.highlight(language, lines.join("\n")).children, []);
   } catch {
     return plain(); // highlight.js gave up: show the text as it is
   }

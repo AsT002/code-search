@@ -785,6 +785,7 @@ don't count.
 |-------|--------|
 | `GET /api/v1/version` | `{"version":"0.1.0","api":1}` |
 | `GET /api/v1/search?q=...` | The `search --json` document |
+| `GET /api/v1/file?repo=...&path=...` | One whole file, as it was indexed, like an entry of a search's `files`, with every line and no matches |
 | `GET /api/v1/repos` | `{"repos":[{"name","source","location","commit"}]}` |
 | `POST /api/v1/repos` `{"source","name"}` | Adds a repo: 201 with `{"repo","report"}` |
 | `POST /api/v1/repos/<name>/update` `{"rebuild"}` | `{"repo","rebuilt","reason","report"}`; `report` only if rebuilt |
@@ -808,7 +809,8 @@ Errors:
   `bad_request`, 403 `forbidden`, 404 `not_found` or `unknown_repo`, 413 for a
   body over 64 KiB, 415 `unsupported_media_type`, 422 `failed` when a change
   couldn't be made (the message says why: not a Git repo, name taken, Git
-  failed), 500 `internal`.
+  failed), 500 `damaged` when a file can't be read from a damaged index (the
+  message says how to rebuild it), 500 `internal`.
 
 Stopping a search:
 
@@ -987,4 +989,4 @@ with the planner; otherwise a planner bug would hide itself.
 | Fuzzing | Opening and reading damaged index files; the query parser with deep nesting and long input. We keep the inputs that found bugs |
 | Sanitizers | ASan and UBSan, and TSan for the threaded search and build (`asan` and `tsan` presets) |
 | HTTP server | The same document as `search --json`, byte for byte, for finished searches and for errors before the search starts. Cancelling when the client goes away, the time limit, an update deleting the index file a search has open, searches at the same time, and requests from other sites turned away |
-| Web UI | `npm test` in `web/`: byte offsets to highlights (non-ASCII, cut characters, invalid UTF-8), syntax colors (by file name, across lines, cut at match edges), and that file content, paths and messages come out escaped |
+| Web UI | `npm test` in `web/`: byte offsets to highlights (non-ASCII, cut characters, invalid UTF-8), syntax colors (by file name, across lines, cut at match edges, long files in pieces), the page address for a search and an open file, links to files and lines, and that file content, paths and messages come out escaped |

@@ -16,6 +16,7 @@
   --syntax-title: #8250df;
   --syntax-type: #953800;
   --syntax-tag: #116329;
+  --selected: #ddf4ff;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
@@ -31,6 +32,7 @@
     --accent: #4493f8;
     --error: #f85149;
     --warning: #d29922;
+    --selected: #0c2d48;
     --syntax-keyword: #ff7b72;
     --syntax-string: #a5d6ff;
     --syntax-comment: #8b949e;
@@ -196,6 +198,52 @@ mark {
 .help code {
   color: var(--fg);
   margin-right: 8px;
+}
+
+/* Links to files and lines. */
+a.path {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.path:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+a.line-number {
+  text-decoration: none;
+}
+
+a.line-number:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.linked-line .line-text {
+  cursor: pointer;
+}
+
+.linked-line:hover {
+  background: var(--panel);
+}
+
+.selected-line,
+.selected-line:hover {
+  background: var(--selected);
+}
+
+.file-view .back {
+  margin: 0 0 8px;
+}
+
+.file-view .back a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.muted {
+  color: var(--muted);
 }
 
 /* Syntax highlighting: classes from highlight.js (see syntax.ts). */

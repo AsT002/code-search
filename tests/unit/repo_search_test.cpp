@@ -164,6 +164,15 @@ std::vector<std::string> found(std::span<const SearchTarget> targets, const Sear
     return out;
 }
 
+TEST(AllLines, EveryLineSplitLikeResults) {
+    EXPECT_EQ(allLines(""), std::vector<ResultLine>{});
+    EXPECT_EQ(allLines("a"), std::vector<ResultLine>{around(1, "a")});
+    EXPECT_EQ(allLines("a\n"), std::vector<ResultLine>{around(1, "a")});
+    EXPECT_EQ(allLines("a\r\n\nb\r"),
+              (std::vector<ResultLine>{around(1, "a"), around(2, ""), around(3, "b\r")}));
+    EXPECT_EQ(allLines("\n\n"), (std::vector<ResultLine>{around(1, ""), around(2, "")}));
+}
+
 TEST(SearchRepos, EachRepoGetsItsPartOfTheQuery) {
     IndexBuilder a;
     a.add("x.txt", "foo bar");

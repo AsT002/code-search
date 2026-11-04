@@ -47,6 +47,16 @@ describe("highlightLines", () => {
     expect(highlightLines("c", [long])).toEqual([[{ text: long, classes: [] }]]);
   });
 
+  test("colors a long block in pieces, and leaves only a huge line plain", () => {
+    const lines = Array.from({ length: 5000 }, (_, i) => `int x${i} = ${i}; // line ${i}`);
+    const tokens = highlightLines("c", [...lines, "x".repeat(60_000), "int last;"]);
+    expect(tokens).toHaveLength(lines.length + 2);
+    expect(classesAt(tokens[0], "int")).toContain("hljs-type");
+    expect(classesAt(tokens[4999], "// line 4999")).toContain("hljs-comment");
+    expect(tokens[5000]).toEqual([{ text: "x".repeat(60_000), classes: [] }]);
+    expect(classesAt(tokens[5001], "int")).toContain("hljs-type");
+  });
+
   test("keeps empty lines", () => {
     const tokens = highlightLines("go", ["a", "", "b"]);
     expect(tokens).toHaveLength(3);

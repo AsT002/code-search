@@ -137,7 +137,8 @@ npm --prefix web run build              # makes web/dist
 ./build/debug/code-search serve         # http://127.0.0.1:7700
 ```
 
-Open http://127.0.0.1:7700 to search from the browser. `--port` picks
+Open http://127.0.0.1:7700 to search from the browser. Click a file name to
+open the whole file, or a line to open the file at that line. `--port` picks
 another port, and `--ui <folder>` serves the UI from somewhere other than
 `web/dist`. Ctrl-C stops the server. It only listens on 127.0.0.1.
 
@@ -145,6 +146,7 @@ The API is under `/api/v1/`. A search gives the same JSON as `search --json`:
 
 ```sh
 curl 'http://127.0.0.1:7700/api/v1/search?q=authenticate&max_results=20'
+curl 'http://127.0.0.1:7700/api/v1/file?repo=redis&path=src/server.c'
 curl http://127.0.0.1:7700/api/v1/repos
 curl -X POST -H 'Content-Type: application/json' \
      -d '{"source":"/path/to/repo"}' http://127.0.0.1:7700/api/v1/repos

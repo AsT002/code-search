@@ -184,6 +184,51 @@ TEST_F(ServerTest, SaysWhenNoRepoIsAdded) {
     EXPECT_NE(result->body.find("no repos added yet"), std::string::npos);
 }
 
+TEST_F(ServerTest, ShowsAWholeFile) {
+    const RunningServer server(config());
+    httplib::Client client = server.client();
+    httplib::Result result =
+        client.Get("/api/v1/file", {{"repo", "alpha"}, {"path", "crlf.txt"}}, httplib::Headers{});
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+    EXPECT_EQ(headerOf(result, "Content-Type"), "application/json");
+    EXPECT_EQ(Json::parse(result->body),
+              Json::parse(R"({"repo":"alpha","path":"crlf.txt","lines":[)"
+                          R"({"line":1,"text":"target with CRLF","matches":[]},)"
+                          R"({"line":2,"text":"next","matches":[]}]})"));
+
+    // Bytes that aren't UTF-8 come with their exact bytes, as in a search.
+    result = client.Get("/api/v1/file", {{"repo", "alpha"}, {"path", "bad-utf8.txt"}},
+                        httplib::Headers{});
+    ASSERT_TRUE(result);
+    EXPECT_TRUE(Json::parse(result->body)["lines"][0].contains("text_base64"));
+}
+
+TEST_F(ServerTest, ExplainsAFileItCantShow) {
+    const RunningServer server(config());
+    httplib::Client client = server.client();
+    struct Case {
+        httplib::Params params;
+        int status;
+        std::string code;
+    };
+    const std::vector<Case> cases = {
+        {{{"repo", "alpha"}, {"path", "missing.txt"}}, 404, "not_found"},
+        {{{"repo", "alpha"}, {"path", "src"}}, 404, "not_found"},  // a folder
+        {{{"repo", "gamma"}, {"path", "a.txt"}}, 404, "unknown_repo"},
+        {{{"repo", "alpha"}}, 400, "bad_request"},
+        {{{"repo", ""}, {"path", "a.txt"}}, 400, "bad_request"},
+        {{{"repo", "alpha"}, {"path", "a.txt"}, {"path", "b.txt"}}, 400, "bad_request"},
+        {{{"repo", "alpha"}, {"path", "a.txt"}, {"line", "2"}}, 400, "bad_request"},
+    };
+    for (const Case& test : cases) {
+        const httplib::Result result = client.Get("/api/v1/file", test.params, httplib::Headers{});
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, test.status) << result->body;
+        EXPECT_EQ(Json::parse(result->body)["error"]["code"], test.code);
+    }
+}
+
 TEST_F(ServerTest, ReportsItsVersion) {
     const RunningServer server(config());
     const httplib::Result result = server.client().Get("/api/v1/version");

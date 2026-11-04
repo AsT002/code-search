@@ -24,6 +24,10 @@ struct ResultLine {
     friend bool operator==(const ResultLine&, const ResultLine&) = default;
 };
 
+// Every line of a file, numbered from 1, with no matches: for showing a
+// whole file. Lines are split like resultLines does. Empty for an empty file.
+std::vector<ResultLine> allLines(std::string_view content);
+
 // The lines to show for one file: each line with a match, up to
 // `maxMatchLines` of them, plus up to `context` lines before and after each.
 // `matches` must be sorted, as locate() gives them. A match that runs past
