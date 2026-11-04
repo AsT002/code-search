@@ -2,7 +2,7 @@
 // React text node, which React escapes, so file content can never become
 // HTML. Nothing here may use dangerouslySetInnerHTML.
 
-import { memo, useMemo, type MouseEvent, type ReactNode } from "react";
+import { Fragment, memo, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 
 import type { OpenFile } from "./address";
 import type { ResultFile, ResultLine, SearchResponse } from "./api";
@@ -74,12 +74,18 @@ export const LineView = memo(function LineView({
       )}
       <code className="line-text" onClick={link === undefined ? undefined : followUnlessSelecting(link)}>
         {painted.map((segment, i) => {
-          const tokens = segment.tokens.map((token, k) => (
-            <span key={k} className={token.classes.length > 0 ? token.classes.join(" ") : undefined}>
-              {token.text}
-            </span>
-          ));
-          return segment.match ? <mark key={i}>{tokens}</mark> : <span key={i}>{tokens}</span>;
+          // Only colored text gets an element: a long result list has
+          // hundreds of thousands of pieces, and each element costs.
+          const tokens = segment.tokens.map((token, k) =>
+            token.classes.length > 0 ? (
+              <span key={k} className={token.classes.join(" ")}>
+                {token.text}
+              </span>
+            ) : (
+              <Fragment key={k}>{token.text}</Fragment>
+            ),
+          );
+          return segment.match ? <mark key={i}>{tokens}</mark> : <Fragment key={i}>{tokens}</Fragment>;
         })}
       </code>
     </div>
@@ -214,12 +220,48 @@ export function Results({
   filesOnly: boolean;
   linkFor?: LinkFor;
 }) {
+  // Drawing every line of a big result would freeze the page, so files are
+  // drawn until about LINES_AT_ONCE lines are, and a button adds more. The
+  // count goes back to the start for each new response.
+  const [shown, setShown] = useState({ response, lines: LINES_AT_ONCE });
+  const maxLines = shown.response === response ? shown.lines : LINES_AT_ONCE;
+  const files = filesToDraw(response.files, maxLines);
+  const linesLeft = countLines(response.files.slice(files.length));
   return (
     <div className="results">
       <Summary response={response} filesOnly={filesOnly} />
-      {response.files.map((file) => (
+      {files.map((file) => (
         <FileResult key={`${file.repo}\u0000${file.path_base64 ?? file.path}`} file={file} linkFor={linkFor} />
       ))}
+      {files.length < response.files.length && (
+        <button
+          type="button"
+          className="show-more"
+          onClick={() => setShown({ response, lines: maxLines + LINES_AT_ONCE })}
+        >
+          Show more ({plural(response.files.length - files.length, "more file")},{" "}
+          {plural(linesLeft, "line")})
+        </button>
+      )}
     </div>
   );
+}
+
+// How many result lines are drawn at first, and added by "Show more".
+export const LINES_AT_ONCE = 2000;
+
+function countLines(files: ResultFile[]): number {
+  return files.reduce((count, file) => count + Math.max(file.lines.length, 1), 0);
+}
+
+// The first files, whole, until they have at least `maxLines` lines (a file
+// with no lines counts as one). Always at least one file.
+export function filesToDraw(files: ResultFile[], maxLines: number): ResultFile[] {
+  let lines = 0;
+  let count = 0;
+  while (count < files.length && (count === 0 || lines < maxLines)) {
+    lines += Math.max(files[count]?.lines.length ?? 0, 1);
+    count++;
+  }
+  return files.slice(0, count);
 }

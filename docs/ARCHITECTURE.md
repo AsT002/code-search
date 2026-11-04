@@ -716,6 +716,14 @@ file. Ctrl-C is checked between files, so it waits for that file.
 ending. There's no group around the pattern: a `\Q` without `\E` would
 quote its `)`.
 
+RE2 takes a lock inside a compiled pattern on every search. When many
+threads share one pattern and matches are dense, they queue on that lock:
+`/.+/` took as long on 10 threads as on one. So a search on the pool gives
+each thread its own copy of a regex query's evaluator, with the patterns
+compiled again (`Evaluator::withOwnRegexes`), picked by
+`ThreadPool::workerIndex`. A copy costs a compile per thread, and a regex
+that fills its DFA cache fills one per thread (each under the 64 MiB cap).
+
 `never_nl` doesn't stop `\C`, which matches any one byte, from matching a
 `\n`. So a regex with `\C` (found by walking RE2's parse tree) is searched
 one line at a time: each search ends at its line's end, while RE2 still sees

@@ -1,5 +1,66 @@
 # Benchmarks
 
+## After M9: output and regex threads
+
+Profiled with `sample` on an Apple M4 (10 cores), release build, warm file
+cache, over six repos (redis, fmt, express, flask, gin, ripgrep: 2,883
+files). Times are medians, in ms, for all results. "CLI" runs a fresh
+process each time, with output to /dev/null; "HTTP" is a running server.
+
+What was slow, and what changed:
+
+1. Text output wrote each line in about 15 `std::cout <<` calls, each a
+   locked `fwrite`. Now each file's output is built in one string and
+   written at once.
+2. JSON escaping added one byte at a time, and numbers went through
+   `std::to_string`. Now the bytes between escapes are copied in one append,
+   the string is reserved up front, and numbers use `std::to_chars`.
+3. Every pool thread searched with the same RE2 object, which takes a lock
+   on each search. With dense matches the threads queued on it, so 10
+   threads were as slow as one. Now each thread gets its own copy of a
+   regex query's evaluator, with the pattern compiled again.
+4. The web UI drew every result line. Now it draws whole files up to about
+   2,000 lines and a file view up to 3,000 (or past the line it opens at),
+   with a button for more, and plain text gets no element of its own.
+
+| Query | CLI text, before | after | CLI JSON, before | after | HTTP, before | after |
+|-------|----:|----:|----:|----:|----:|----:|
+| `e` (2.1M lines) | 417 | 105 | 208 | 139 | 234 | 161 |
+| `/.+/` | 380 | 81 | 246 | 115 | 261 | 127 |
+| `the` | 44.7 | 16.9 | 35.2 | 21.3 | 33.5 | 19.3 |
+| `func` | 14.1 | 9.4 | 12.1 | 9.3 | 7.8 | 5.3 |
+
+Search alone (`search_bench`, no output), by threads:
+
+| Query | 1, before | after | 4, before | after | 10, before | after |
+|-------|----:|----:|----:|----:|----:|----:|
+| `/.+/` | 225 | 213 | 98.0 | 61.6 | 218 | 40.2 |
+| `e` | 181 | 180 | 58.7 | 52.3 | 38.4 to 44 | 38.7 to 44 |
+
+Small queries were already bound by starting the program (about 3.5 ms,
+against 1.5 ms for an empty program) and don't change.
+
+Web UI, rendering to HTML in Node (a browser also builds the DOM, so it
+takes longer):
+
+| Response | Lines | Before | After |
+|----------|------:|-------:|------:|
+| limit 200 | 200 | 11 | 10 |
+| limit 200, 3 lines of context | 1,103 | 25 | 23.5 |
+| limit 5,000, 3 lines of context | 23,957 | 514 to 569 | 40 (2,018 drawn) |
+| no limit, `func` | 15,221 | 592 | 82 (2,063 drawn) |
+| file view, redis `src/server.c` | 8,734 | 139 | 51 (3,000 drawn) |
+
+Memory: a regex that fills RE2's DFA cache now fills one per thread. For
+`/(a|b).{30}(a|b){30}c/` peak memory went from 53.8 to 67.3 MiB (and the
+time from 80 to 60 ms); for ordinary regexes it didn't change. Each copy
+stays under the 64 MiB cap (see M8).
+
+Not changed: the time limit on highlighting still reads the clock before
+each regex search. It's about 7% of the pool threads' busy time on `/.+/`,
+but reading it less often could let a pathological regex run past the
+limit.
+
 ## M8: Regex
 
 Same machine, repos and method as M7 below: warm runs with `search_bench`

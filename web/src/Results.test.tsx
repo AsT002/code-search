@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 
 import type { ResultFile, SearchResponse } from "./api";
-import { FileResult, LineView, Results, resultCount, type LinkFor } from "./Results";
+import { FileResult, LINES_AT_ONCE, LineView, Results, filesToDraw, resultCount, type LinkFor } from "./Results";
 
 // Links like the app makes, without its navigation.
 const linkFor: LinkFor = (open) => ({
@@ -104,6 +104,30 @@ describe("results", () => {
       <LineView line={{ line: 3, text: "y", matches: [] }} painted={[]} fadeContext={false} selected anchor />,
     );
     expect(html).toContain('class="line selected-line" id="L3"');
+  });
+
+  test("draws whole files up to the line cap, then offers more", () => {
+    const file = (name: string, lines: number): ResultFile => ({
+      repo: "r",
+      path: name,
+      lines: Array.from({ length: lines }, (_, i) => ({ line: i + 1, text: "x", matches: [] })),
+    });
+    const files = [file("a", 3), file("b", 3), file("c", 3)];
+    expect(filesToDraw(files, 4).map((f) => f.path)).toEqual(["a", "b"]);
+    expect(filesToDraw(files, 3).map((f) => f.path)).toEqual(["a"]);
+    expect(filesToDraw([file("big", 50)], 1)).toHaveLength(1); // always one
+    expect(filesToDraw([], 10)).toEqual([]);
+
+    const many = Array.from({ length: 30 }, (_, i) => file(`f${i}`, 100));
+    const html = renderToStaticMarkup(<Results response={{ files: many, status: "complete" }} filesOnly={false} />);
+    const drawn = LINES_AT_ONCE / 100;
+    expect(html.match(/class="file"/g)?.length).toBe(drawn);
+    expect(html).toContain(`Show more (${30 - drawn} more files, ${(30 - drawn) * 100} lines)`);
+  });
+
+  test("plain text gets no element of its own", () => {
+    const file: ResultFile = { repo: "r", path: "notes.txt", lines: [{ line: 1, text: "a b c", matches: [{ start: 2, end: 3 }] }] };
+    expect(renderToStaticMarkup(<FileResult file={file} />)).toContain('<code class="line-text">a <mark>b</mark> c</code>');
   });
 
   test("counts results the way the limit does", () => {

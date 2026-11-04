@@ -6,13 +6,29 @@
 
 namespace codesearch {
 
+namespace {
+
+// The pool the calling thread works for, and its number in that pool.
+// thread_local: each thread has its own copy. work() sets it.
+struct Worker {
+    const ThreadPool* pool = nullptr;
+    std::size_t index = 0;
+};
+
+Worker& currentWorker() {
+    thread_local Worker worker;
+    return worker;
+}
+
+}  // namespace
+
 ThreadPool::ThreadPool(std::size_t threads) {
     threads = std::max<std::size_t>(threads, 1);
     threads_.reserve(threads);
     try {
         for (std::size_t i = 0; i < threads; ++i) {
-            threads_.emplace_back([this] {
-                work();
+            threads_.emplace_back([this, i] {
+                work(i);
             });
         }
     } catch (...) {
@@ -47,7 +63,16 @@ void ThreadPool::submit(std::function<void()> task) {
     wake_.notify_one();
 }
 
-void ThreadPool::work() {
+std::optional<std::size_t> ThreadPool::workerIndex() const {
+    const Worker& worker = currentWorker();
+    if (worker.pool != this) {
+        return std::nullopt;
+    }
+    return worker.index;
+}
+
+void ThreadPool::work(std::size_t index) {
+    currentWorker() = Worker{.pool = this, .index = index};
     while (true) {
         std::function<void()> task;
         {

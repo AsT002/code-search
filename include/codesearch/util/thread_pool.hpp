@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -30,13 +31,18 @@ public:
 
     std::size_t size() const { return threads_.size(); }
 
+    // Which of this pool's threads is calling, from 0 to size() - 1, or
+    // nothing if it isn't one of them. Lets a task use things kept one per
+    // thread, which then need no lock.
+    std::optional<std::size_t> workerIndex() const;
+
     // Adds a task to the queue. Some thread runs it later. Can throw (if
     // memory runs out); then the task never runs. Virtual so tests can make
     // it fail.
     virtual void submit(std::function<void()> task);
 
 private:
-    void work();
+    void work(std::size_t index);
     void stopAndJoin();
 
     std::mutex mutex_;

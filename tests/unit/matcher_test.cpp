@@ -211,6 +211,27 @@ TEST(RegexMatcher, FindsEachMatchOnce) {
     EXPECT_TRUE(regexSpans("z", "abc").empty());
 }
 
+TEST(RegexMatcher, AnOwnCopyMatchesTheSame) {
+    for (const bool caseSensitive : {true, false}) {
+        const RegexMatcher matcher("^B[a-z]+|x\\C", caseSensitive);
+        const RegexMatcher copy = matcher.withOwnCopy();
+        EXPECT_NE(&copy.compiled(), &matcher.compiled());
+        const std::string text = "bar\nBaz x\xC3\xA9\nqux";
+        std::vector<Span> fromMatcher;
+        std::vector<Span> fromCopy;
+        matcher.findAll(text, [&](Span span) {
+            fromMatcher.push_back(span);
+            return true;
+        });
+        copy.findAll(text, [&](Span span) {
+            fromCopy.push_back(span);
+            return true;
+        });
+        EXPECT_FALSE(fromMatcher.empty());
+        EXPECT_EQ(fromCopy, fromMatcher);
+    }
+}
+
 // ^ and $ work on every line, not just the whole text. $ is before the LF,
 // so a CR before it is part of the line's text.
 TEST(RegexMatcher, AnchorsWorkOnEachLine) {

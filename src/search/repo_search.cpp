@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 
 #include "codesearch/query/planner.hpp"
@@ -333,6 +334,11 @@ private:
         const SearchTarget* target = nullptr;
         // optional, because an Evaluator can only be made from a query.
         std::optional<Evaluator> evaluator;
+        // For a query with a regex: a copy of `evaluator` for each pool
+        // thread, made when it first needs one, then one for the calling
+        // thread. RE2 locks a pattern on every search, so threads sharing
+        // one slow each other down. Each slot is only used by its thread.
+        std::vector<std::optional<Evaluator>> perThread;
         std::vector<DocId> candidates;
         std::exception_ptr error;  // finding the candidates failed
     };
@@ -373,6 +379,7 @@ private:
     std::size_t nextChunkFiles();
     void submit(std::unique_ptr<Chunk> chunk, bool next = false);
     void check(Chunk& chunk);
+    const Evaluator& evaluatorFor(Repo& repo) const;
     Found makeFound(const Evaluator& evaluator, DocId doc, std::string_view path,
                     std::string_view content) const;
     bool pass(const Repo& repo, Found& found, std::size_t& remaining);
@@ -422,6 +429,9 @@ void ParallelSearch::prepare() {
         repo.evaluator.emplace(query, request_.options);
         try {
             repo.evaluator->useIndex(*target.index);
+            if (repo.evaluator->usesRegex()) {
+                repo.perThread.resize(request_.pool->size() + 1);
+            }
             repo.candidates =
                 findCandidates(*target.index, planCandidates(query, request_.options));
         } catch (const IndexFileError&) {
@@ -562,11 +572,32 @@ ParallelSearch::Found ParallelSearch::makeFound(const Evaluator& evaluator, DocI
     return found;
 }
 
+// The evaluator for the calling thread to use: its own copy if the query
+// has a regex (see Repo::perThread), otherwise the shared one.
+const Evaluator& ParallelSearch::evaluatorFor(Repo& repo) const {
+    if (!repo.evaluator.has_value()) {
+        // prepare() makes one for every repo it adds.
+        throw std::logic_error("a repo to search has no evaluator");
+    }
+    const Evaluator& shared = *repo.evaluator;
+    if (repo.perThread.empty()) {
+        return shared;
+    }
+    const std::size_t slot = request_.pool->workerIndex().value_or(request_.pool->size());
+    std::optional<Evaluator>& own = repo.perThread[slot];
+    if (!own.has_value()) {
+        own = shared.withOwnRegexes();
+    }
+    return *own;
+}
+
 // Runs on a pool thread: finds which of the chunk's files match.
 void ParallelSearch::check(Chunk& chunk) {
-    const Repo& repo = repos_[chunk.repo];
+    Repo& repo = repos_[chunk.repo];
     const IndexReader& index = *repo.target->index;
     try {
+        // Inside the try: copying it can run out of memory.
+        const Evaluator& evaluator = evaluatorFor(repo);
         for (std::size_t i = chunk.begin; i < chunk.end; ++i) {
             if (stop_ || cancelled()) {
                 chunk.cutShort = true;
@@ -581,13 +612,13 @@ void ParallelSearch::check(Chunk& chunk) {
             const DocId doc = repo.candidates[i];
             const std::string_view path = index.path(doc);
             index.withContent(doc, [&](std::string_view content) {
-                if (!repo.evaluator->matches(doc, path, content)) {
+                if (!evaluator.matches(doc, path, content)) {
                     return;
                 }
                 // Made whole before it's added, so if something throws
                 // partway (like running out of memory), the chunk never
                 // holds a half-made result.
-                Found found = makeFound(repo.evaluator.value(), doc, path, content);
+                Found found = makeFound(evaluator, doc, path, content);
                 const std::size_t bytes = bytesOf(found.path, found.matches, found.lines);
                 chunk.found.push_back(std::move(found));
                 chunk.bytes += bytes;

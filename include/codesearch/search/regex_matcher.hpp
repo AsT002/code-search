@@ -24,7 +24,9 @@ namespace codesearch {
 // letters too (unlike LiteralMatcher, which folds only ASCII).
 //
 // Cheap to copy: copies share one compiled pattern, which is safe to use
-// from many threads at once.
+// from many threads at once. But RE2 takes a lock inside the pattern on
+// every search, so threads sharing one slow each other down when matches
+// are dense. withOwnCopy() gives a thread a pattern of its own.
 class RegexMatcher {
 public:
     // Throws std::invalid_argument if `pattern` isn't a valid regex.
@@ -47,6 +49,9 @@ public:
     // limit is checked between searches, so one slow search can still run
     // past it.
     void findAll(std::string_view text, const std::function<bool(Span)>& onMatch) const;
+
+    // The same matcher with the pattern compiled again, shared with no one.
+    RegexMatcher withOwnCopy() const;
 
     // The compiled regex, for the planner (see planCandidates).
     const re2::RE2& compiled() const { return *re_; }

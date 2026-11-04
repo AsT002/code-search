@@ -26,6 +26,13 @@ public:
     // once, before any search, then pass each file's doc ID below.
     void useIndex(const IndexReader& index);
 
+    // Whether the query has a regex, for the text or the path.
+    bool usesRegex() const;
+
+    // A copy whose regexes have patterns of their own (see
+    // RegexMatcher::withOwnCopy), for one thread of a search to use.
+    Evaluator withOwnRegexes() const;
+
     // Whether the file matches the query.
     bool matches(std::string_view path, std::string_view content) const;
     // The same for file `doc` of the index given to useIndex.
@@ -79,6 +86,8 @@ private:
 
     static Node compile(const QueryNode& query, const SearchOptions& options, bool required);
     static void lookUp(Node& node, const IndexReader& index);
+    static bool hasRegex(const Node& node);
+    static void ownRegexes(Node& node);
     static bool nodeMatches(const Node& node, const File& file);
     static void collect(const Node& node, const File& file, std::vector<Span>& out);
 

@@ -2,6 +2,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <csignal>
@@ -316,10 +317,23 @@ std::string forTerminal(std::string_view text, int fd) {
     }
 }
 
-// `text` as it should be printed: escaped if `escape`, so a file's bytes
-// can't control the terminal (see escapeForTerminal).
-std::string shown(std::string_view text, bool escape) {
-    return escape ? escapeForTerminal(text) : std::string(text);
+// Adds `text` to `out` as it should be printed: escaped if `escape`, so a
+// file's bytes can't control the terminal (see escapeForTerminal).
+void appendShown(std::string& out, std::string_view text, bool escape) {
+    if (escape) {
+        out += escapeForTerminal(text);
+    } else {
+        out += text;
+    }
+}
+
+// Adds a number in decimal. std::to_chars writes it into a buffer on the
+// stack, so it allocates nothing.
+void appendNumber(std::string& out, std::size_t value) {
+    std::array<char, 20> digits{};  // enough for any 64-bit number
+    const std::to_chars_result result =
+        std::to_chars(digits.data(), digits.data() + digits.size(), value);
+    out.append(digits.data(), result.ptr);
 }
 
 // Where each character of `text` starts: starts[i] is true if one starts at
@@ -336,11 +350,12 @@ std::vector<bool> characterStarts(std::string_view text) {
     return starts;
 }
 
-// Prints a line's text with its matches colored. Each piece is escaped on
+// Adds a line's text to `out` with its matches colored. Each piece is escaped on
 // its own, so the highlights stay where they were. When escaping, a
 // highlight that starts or ends inside a character is widened to all of
 // it: half a character would be invalid UTF-8, and shown escaped.
-void printHighlighted(const ResultLine& line, const Colors& colors, bool escape) {
+void appendHighlighted(std::string& out, const ResultLine& line, const Colors& colors,
+                       bool escape) {
     const std::vector<bool> starts = escape ? characterStarts(line.text) : std::vector<bool>{};
     std::size_t done = 0;
     for (const Span& match : line.matches) {
@@ -359,13 +374,14 @@ void printHighlighted(const ResultLine& line, const Colors& colors, bool escape)
         if (span.end <= begin) {
             continue;
         }
-        std::cout << shown(std::string_view(line.text).substr(done, begin - done), escape)
-                  << colors.match
-                  << shown(std::string_view(line.text).substr(begin, span.end - begin), escape)
-                  << colors.reset;
+        const std::string_view text = line.text;
+        appendShown(out, text.substr(done, begin - done), escape);
+        out += colors.match;
+        appendShown(out, text.substr(begin, span.end - begin), escape);
+        out += colors.reset;
         done = span.end;
     }
-    std::cout << shown(std::string_view(line.text).substr(done), escape);
+    appendShown(out, std::string_view(line.text).substr(done), escape);
 }
 
 // Prints one file's results, grep style:
@@ -379,32 +395,54 @@ public:
     TextPrinter(std::size_t contextLines, Colors colors, bool escape)
         : contextLines_(contextLines), colors_(colors), escape_(escape) {}
 
+    // Builds the file's output in one string and writes it at once: each
+    // write to std::cout takes a lock, and a big search prints millions of
+    // lines.
     void file(const ResultFile& file) {
-        const std::string prefix = file.repo.empty() ? "" : file.repo + ":";
-        const std::string path = shown(file.path, escape_);
+        std::string out;
+        // The repo and path, colored, as each line starts.
+        std::string name(colors_.path);
+        if (!file.repo.empty()) {
+            name += file.repo;
+            name += ':';
+        }
+        appendShown(name, file.path, escape_);
+        name += colors_.reset;
         if (file.lines.empty()) {
-            std::cout << colors_.path << prefix << path << colors_.reset << '\n';
-            return;
+            out += name;
+            out += '\n';
         }
         std::size_t previous = 0;
         for (const ResultLine& line : file.lines) {
             const bool gap = previous == 0 || line.number != previous + 1;
             if (contextLines_ > 0 && gap && printedLines_) {
-                std::cout << colors_.separator << "--" << colors_.reset << '\n';
+                out += colors_.separator;
+                out += "--";
+                out += colors_.reset;
+                out += '\n';
             }
-            const char separator = line.matches.empty() ? '-' : ':';
-            std::cout << colors_.path << prefix << path << colors_.reset << colors_.separator
-                      << separator << colors_.reset << colors_.number << line.number
-                      << colors_.reset << colors_.separator << separator << colors_.reset;
+            // ':' after a line with matches, '-' after a context line.
+            std::string separator(colors_.separator);
+            separator += line.matches.empty() ? '-' : ':';
+            separator += colors_.reset;
+            out += name;
+            out += separator;
+            out += colors_.number;
+            appendNumber(out, line.number);
+            out += colors_.reset;
+            out += separator;
             if (!line.matches.empty()) {
-                std::cout << colors_.number << line.matches[0].begin + 1 << colors_.reset
-                          << colors_.separator << ':' << colors_.reset;
+                out += colors_.number;
+                appendNumber(out, line.matches[0].begin + 1);
+                out += colors_.reset;
+                out += separator;
             }
-            printHighlighted(line, colors_, escape_);
-            std::cout << '\n';
+            appendHighlighted(out, line, colors_, escape_);
+            out += '\n';
             previous = line.number;
             printedLines_ = true;
         }
+        std::cout.write(out.data(), static_cast<std::streamsize>(out.size()));
     }
 
 private:

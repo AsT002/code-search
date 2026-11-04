@@ -305,3 +305,15 @@ a.line-number:hover {
 .hljs-deletion {
   color: var(--syntax-keyword);
 }
+
+.show-more {
+  display: block;
+  margin: 16px auto;
+  padding: 6px 14px;
+  font: inherit;
+  color: var(--accent);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}

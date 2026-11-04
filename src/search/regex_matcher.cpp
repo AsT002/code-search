@@ -138,6 +138,13 @@ std::optional<std::string> RegexMatcher::problemWith(std::string_view pattern) {
     return re.error();
 }
 
+RegexMatcher RegexMatcher::withOwnCopy() const {
+    RegexMatcher copy = *this;
+    // The same pattern and options, so it compiles the same way.
+    copy.re_ = std::make_shared<const RE2>(re_->pattern(), re_->options());
+    return copy;
+}
+
 bool RegexMatcher::foundIn(std::string_view text) const {
     if (!RE2::PartialMatch(text, *re_)) {
         return false;

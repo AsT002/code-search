@@ -95,6 +95,37 @@ void Evaluator::lookUp(Node& node, const IndexReader& index) {
     node.usesIndex = true;
 }
 
+bool Evaluator::usesRegex() const {
+    return hasRegex(root_);
+}
+
+bool Evaluator::hasRegex(const Node& node) {
+    if (node.regex.has_value()) {
+        return true;
+    }
+    for (const Node& child : node.children) {
+        if (hasRegex(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Evaluator Evaluator::withOwnRegexes() const {
+    Evaluator copy = *this;
+    ownRegexes(copy.root_);
+    return copy;
+}
+
+void Evaluator::ownRegexes(Node& node) {
+    if (node.regex.has_value()) {
+        node.regex = node.regex->withOwnCopy();
+    }
+    for (Node& child : node.children) {
+        ownRegexes(child);
+    }
+}
+
 bool Evaluator::matches(std::string_view path, std::string_view content) const {
     return nodeMatches(root_, File{.doc = std::nullopt, .path = path, .content = content});
 }

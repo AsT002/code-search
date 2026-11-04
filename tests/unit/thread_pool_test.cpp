@@ -3,6 +3,10 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
+#include <set>
 #include <system_error>
 
 // Defined when built with ThreadSanitizer, which can't track thousands of
@@ -31,6 +35,45 @@ TEST(ThreadPool, RunsEveryTaskBeforeStopping) {
         }
     }
     EXPECT_EQ(ran.load(), 100);
+}
+
+// Each of a pool's threads has its own number, and threads that aren't
+// the pool's, like the test's or another pool's, have none.
+TEST(ThreadPool, EachThreadKnowsItsNumber) {
+    // Before the pools, so they're destroyed after them: the pools' threads
+    // may still be using these until the pools stop and join them.
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::set<std::size_t> seen;
+    bool otherSawNone = true;
+    int waiting = 0;
+
+    ThreadPool pool(3);
+    const ThreadPool other(2);
+    EXPECT_FALSE(pool.workerIndex().has_value());
+    // Three tasks that wait for each other, so each runs on its own thread.
+    for (int i = 0; i < 3; ++i) {
+        pool.submit([&] {
+            std::unique_lock lock(mutex);
+            const std::optional<std::size_t> index = pool.workerIndex();
+            if (index.has_value()) {
+                seen.insert(index.value());
+            }
+            otherSawNone = otherSawNone && !other.workerIndex().has_value();
+            ++waiting;
+            changed.notify_all();
+            changed.wait(lock, [&] {
+                return waiting == 3;
+            });
+        });
+    }
+    std::unique_lock lock(mutex);
+    changed.wait(lock, [&] {
+        return waiting == 3;
+    });
+    EXPECT_EQ(seen, (std::set<std::size_t>{0, 1, 2}));
+    lock.unlock();
+    EXPECT_TRUE(otherSawNone);
 }
 
 // macOS lets one process have 4096 threads, so asking for more makes
