@@ -86,6 +86,18 @@ TEST(JsonOutput, WholeDocument) {
     EXPECT_EQ(statusName(SearchStatus::Cancelled), "cancelled");
 }
 
+TEST(JsonResultWriter, SkippedAndWarningsComeBeforeTheStatus) {
+    std::ostringstream out;
+    JsonResultWriter writer(out);
+    writer.warning("one \"two\"");
+    writer.skipped("r", "r: damaged");
+    writer.warning("three");
+    writer.finish(SearchStatus::Complete);
+    EXPECT_EQ(out.str(), R"({"files":[],"skipped":[{"repo":"r","error":"r: damaged"}],)"
+                         R"("warnings":["one \"two\"","three"],"status":"complete"})"
+                         "\n");
+}
+
 TEST(JsonResultWriter, AnErrorStillEndsTheDocument) {
     std::ostringstream out;
     JsonResultWriter writer(out);

@@ -485,6 +485,15 @@ void reportSkipped(const std::string& repo, const std::string& message, JsonResu
     }
 }
 
+// Something in the query that's probably a mistake: says so on stderr, and
+// in the JSON. The search still runs as typed.
+void reportWarning(const std::string& message, JsonResultWriter* json) {
+    std::cerr << "code-search: warning: " << forTerminal(message, STDERR_FILENO) << '\n';
+    if (json != nullptr) {
+        json->warning(message);
+    }
+}
+
 // Ctrl-C stopped the command: says so, and ends the JSON document.
 int reportCancelled(JsonResultWriter* json) {
     if (json != nullptr) {
@@ -514,6 +523,9 @@ int searchFolder(const SearchArgs& args, JsonResultWriter* json) {
     const ParsedQuery parsed = parseQuery(args.query);
     if (!repoNamesIn(parsed.root).empty()) {
         throw QueryError("repo: only works on added repos, not with --path");
+    }
+    for (const std::string& warning : parsed.warnings) {
+        reportWarning(warning, json);
     }
     // Files are checked on several threads; results still come out in order.
     const std::unique_ptr<ThreadPool> pool = startPool();
@@ -568,6 +580,10 @@ int searchAndPrint(const SearchArgs& args, JsonResultWriter* json) {
     const SearchStatus status =
         SearchService::run(search, &gCancelled,
                            {
+                               .onWarning =
+                                   [json](const std::string& message) {
+                                       reportWarning(message, json);
+                                   },
                                .onFile =
                                    [&](const ResultFile& file) {
                                        printer.file(file);

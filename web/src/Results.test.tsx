@@ -25,16 +25,18 @@ describe("escaping", () => {
     expect(html).toContain("&amp;amp;");
   });
 
-  test("error and skipped messages are text too", () => {
+  test("error, skipped and warning messages are text too", () => {
     const response: SearchResponse = {
       files: [],
       status: "error",
       error: "<b>bad</b>",
       skipped: [{ repo: "x", error: "x: <i>damaged</i>" }],
+      warnings: ["<u>a/(b)/</u> is searched as plain text"],
     };
     const html = renderToStaticMarkup(<Results response={response} filesOnly={false} />);
     expect(html).toContain("&lt;b&gt;bad&lt;/b&gt;");
     expect(html).toContain("&lt;i&gt;damaged&lt;/i&gt;");
+    expect(html).toContain("&lt;u&gt;a/(b)/&lt;/u&gt; is searched as plain text");
     expect(html).not.toContain("<b>");
   });
 });

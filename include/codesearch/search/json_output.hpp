@@ -26,6 +26,9 @@ std::string resultFileJson(const ResultFile& file);
 //
 //   {"files":[{...},{...}],"status":"complete"}
 //
+// Before "status" may come "skipped" (repos left out) and "warnings"
+// (things in the query that are probably mistakes), each only if not empty.
+//
 // If the search fails partway, fail() ends the document instead, so it's
 // still whole JSON:
 //
@@ -38,18 +41,23 @@ public:
     // A repo left out of the search because its index is damaged. Listed
     // in "skipped", after the files, when the document ends.
     void skipped(std::string_view repo, std::string_view message);
+    // Something in the query that's probably a mistake. Listed in
+    // "warnings", after "skipped", when the document ends.
+    void warning(std::string_view message);
     void finish(SearchStatus status);
     // Ends the document with "status":"error" and the message. Bytes of the
     // message that aren't valid UTF-8 become U+FFFD.
     void fail(std::string_view message);
 
 private:
-    // Ends the "files" list, and writes "skipped" if any repo was.
+    // Ends the "files" list, and writes "skipped" and "warnings" if there
+    // are any.
     void endFiles();
 
     std::ostream* out_;  // a pointer, not a reference, so the class can be assigned
     bool first_ = true;
-    std::string skipped_;  // the "skipped" entries so far, as JSON
+    std::string skipped_;   // the "skipped" entries so far, as JSON
+    std::string warnings_;  // the "warnings" entries so far, as JSON
 };
 
 }  // namespace codesearch

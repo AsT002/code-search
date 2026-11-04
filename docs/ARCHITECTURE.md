@@ -497,7 +497,7 @@ is a breaking change.
 | What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
 | `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` and `\C+` stop at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
-| What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message |
+| What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message. A plain word that ends in `/.../` with regex syntax inside (`[](){}*+?|^$`), like `4./[x]*/`, is still text, but gets a warning that suggests the regex (`/4\.[x]*/`). Paths like `src/server/` don't |
 | Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. For a pathological regex and file, after a time limit only the first match in each line is highlighted (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
@@ -567,6 +567,9 @@ result never has to sit in memory:
   message goes to stderr. The exit code still says whether anything was
   found. If the damaged repo is the last one left to search, it's an error
   instead, as above.
+- Warnings about the query, like a regex that doesn't start its word, go in
+  `warnings`, after `skipped`, as a list of messages. The same messages go to
+  stderr. The search still runs as typed. (Added after M9.)
 - `lines` holds matching lines and context lines; context lines have no
   matches. It's empty with `-l` and for files with nothing to highlight.
 - `start` and `end` are byte offsets inside the line's original bytes. A

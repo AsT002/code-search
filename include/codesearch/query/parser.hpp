@@ -2,7 +2,9 @@
 
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "codesearch/query/ast.hpp"
 
@@ -17,6 +19,9 @@ public:
 struct ParsedQuery {
     QueryNode root;
     std::optional<bool> caseSensitive;  // set by case:yes or case:no
+    // Things in the query that are allowed but probably not what the user
+    // meant, like 4./[x]*/: a regex has to start the term, so that's text.
+    std::vector<std::string> warnings;
 };
 
 // Parses the query language (see "Query language" in docs/ARCHITECTURE.md):

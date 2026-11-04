@@ -81,6 +81,11 @@ export function Summary({ response, filesOnly }: { response: SearchResponse; fil
           Skipped {skipped.error}
         </p>
       ))}
+      {(response.warnings ?? []).map((warning) => (
+        <p key={warning} className="warning">
+          {warning}
+        </p>
+      ))}
     </div>
   );
 }

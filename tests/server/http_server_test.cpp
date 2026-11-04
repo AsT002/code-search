@@ -39,8 +39,8 @@ Cloner noGitHub() {
 // A server on a free port of 127.0.0.1, answering on its own thread.
 class RunningServer {
 public:
-    explicit RunningServer(ServerConfig config) : server_(std::move(config)) {
-        port_ = server_.bind(0);
+    explicit RunningServer(ServerConfig config)
+        : server_(std::move(config)), port_(server_.bind(0)) {
         thread_ = std::thread([this] {
             server_.run();
         });
@@ -66,7 +66,7 @@ public:
 
 private:
     HttpServer server_;
-    int port_ = 0;
+    int port_;  // after server_, so it's set once server_ exists
     std::thread thread_;
 };
 
@@ -100,6 +100,9 @@ protected:
                           {"CODE_SEARCH_HOME=" + workspace().root().string()});
     }
 
+    TempRepo& alpha() { return alpha_; }
+
+private:
     TempDir home_;
     TempRepo alpha_;
     TempRepo beta_;
@@ -119,6 +122,7 @@ struct SameQuery {
 TEST_F(ServerTest, GivesTheSameResultsAsTheCli) {
     const RunningServer server(config());
     httplib::Client client = server.client();
+    const std::string grouped = "(repo:alpha second) or (repo:beta script)";
     const std::vector<SameQuery> queries = {
         {{"target"}, {{"q", "target"}}},
         {{"-C", "1", "target"}, {{"q", "target"}, {"context", "1"}}},
@@ -127,10 +131,10 @@ TEST_F(ServerTest, GivesTheSameResultsAsTheCli) {
         {{"--case-sensitive", "Target"}, {{"q", "Target"}, {"case_sensitive", "true"}}},
         {{"--repo", "beta", "target"}, {{"q", "target"}, {"repo", "beta"}}},
         {{"/fo+/ or lang:go"}, {{"q", "/fo+/ or lang:go"}}},
-        {{"(repo:alpha second) or (repo:beta script)"},
-         {{"q", "(repo:alpha second) or (repo:beta script)"}}},
+        {{grouped}, {{"q", grouped}}},
         {{"--", "-target"}, {{"q", "-target"}}},
         {{"nothing matches this"}, {{"q", "nothing matches this"}}},
+        {{"tar./g[e]t/"}, {{"q", "tar./g[e]t/"}}},  // a warning: the regex isn't one
         // Errors before the search starts: the same document, with a status.
         {{"(target"}, {{"q", "(target"}}, 400},
         {{"/a(/"}, {{"q", "/a(/"}}, 400},
@@ -490,9 +494,9 @@ TEST_F(ServerTest, ASearchKeepsItsSnapshotWhileAnUpdateRuns) {
 
     // Change alpha and update it while the search is partway. The update
     // deletes the index file the search has open.
-    alpha_.write("a.txt", "no longer matching\n");
-    alpha_.write("new.txt", "a new target\n");
-    alpha_.commit();
+    alpha().write("a.txt", "no longer matching\n");
+    alpha().write("new.txt", "a new target\n");
+    alpha().commit();
     const UpdateResult updated = RepoManager(workspace(), noGitHub()).update("alpha", false);
     EXPECT_FALSE(updated.reason.empty());
     gate.open();
@@ -511,6 +515,7 @@ TEST_F(ServerTest, AnswersSearchesAtTheSameTime) {
     const RunningServer server(config());
     const std::string expected = cliSearch({"target"}).out;
     std::vector<std::thread> threads;
+    threads.reserve(8);
     std::atomic<int> same = 0;
     for (int i = 0; i < 8; ++i) {
         threads.emplace_back([&] {

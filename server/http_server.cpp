@@ -393,8 +393,8 @@ void HttpServer::Impl::setUp() {
     const std::size_t queued = config_.maxQueuedRequests;
     // httplib takes ownership of the pool, so this must be a plain `new`.
     server_.new_task_queue = [threads, queued] {
-        return new httplib::ThreadPool(threads, threads,
-                                       queued);  // NOLINT(cppcoreguidelines-owning-memory)
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+        return new httplib::ThreadPool(threads, threads, queued);
     };
     server_.set_payload_max_length(config_.maxBodyBytes);
     server_.set_read_timeout(10);
@@ -429,13 +429,16 @@ void HttpServer::Impl::setUp() {
             sendError(res, 500, "internal", "unknown error");
         }
     });
+    // Errors httplib finds itself, like a body over the limit (413), or a
+    // route that doesn't exist (404). Leaves our own error bodies alone.
+    // It returns Handled itself: clang-tidy's analyzer misreads the
+    // version of set_error_handler that takes a handler returning nothing.
     server_.set_error_handler([](const httplib::Request& /*req*/, httplib::Response& res) {
-        // Errors httplib finds itself, like a body over the limit (413), or
-        // a route that doesn't exist (404). Leaves our own error bodies alone.
         if (res.body.empty()) {
             const std::string code = res.status == 404 ? "not_found" : "bad_request";
             sendError(res, res.status, code, httplib::status_message(res.status));
         }
+        return httplib::Server::HandlerResponse::Handled;
     });
 
     server_.Get("/api/v1/version", [](const httplib::Request& /*req*/, httplib::Response& res) {
@@ -578,6 +581,10 @@ void HttpServer::Impl::streamSearch(PreparedSearch& search,
         const SearchStatus result =
             SearchService::run(search, &running.cancelled,
                                {
+                                   .onWarning =
+                                       [&](const std::string& message) {
+                                           writer.warning(message);
+                                       },
                                    .onFile =
                                        [&](const ResultFile& file) {
                                            if (config_.beforeResultFile) {

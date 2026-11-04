@@ -154,6 +154,42 @@ TEST(Parser, Errors) {
     expectError("a or case:yes", "case: needs something to search for");
 }
 
+// Warnings parseQuery gives for `text`.
+std::vector<std::string> warnings(const std::string& text) {
+    return parseQuery(text).warnings;
+}
+
+TEST(Parser, WarnsAboutARegexInsideAWord) {
+    EXPECT_EQ(warnings("4./[x]*/"),
+              std::vector<std::string>{"4./[x]*/ is searched as plain text, because a regex has "
+                                       "to start the term. For a regex, write /4\\.[x]*/"});
+    // Still searched as typed.
+    EXPECT_EQ(parsed("4./[x]*/"), literal("4./[x]*/"));
+    // One warning per word, and the fix escapes the text before the slash.
+    const std::vector<std::string> two = warnings("a.b/(c|d)/ ok x+/y?/");
+    ASSERT_EQ(two.size(), 2U);
+    EXPECT_NE(two[0].find("write /a\\.b(c|d)/"), std::string::npos);
+    EXPECT_NE(two[1].find("write /x\\+y?/"), std::string::npos);
+}
+
+TEST(Parser, NoWarningWhenItIsntARegex) {
+    for (const std::string text : {
+             "src/server/",
+             "a/b/c",
+             "/fo+/",
+             "path:a/(b)/",
+             "\"4./[x]*/\"",
+             "4.\\/[x]*/",
+             "a/(b)/c",
+             "//",
+             "x//",
+             "a/b",
+         }) {
+        SCOPED_TRACE(text);
+        EXPECT_TRUE(warnings(text).empty());
+    }
+}
+
 TEST(Parser, LimitsNesting) {
     const std::string ok = std::string(100, '(') + "a" + std::string(100, ')');
     EXPECT_EQ(parsed(ok), literal("a"));

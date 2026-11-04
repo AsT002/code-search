@@ -25,6 +25,7 @@ PreparedSearch SearchService::prepare(const SearchSettings& settings) const {
             },
         .repos = {},
         .damaged = {},
+        .warnings = parsed.warnings,
     };
     if (!settings.repo.empty()) {
         search.request.query = allOf({repoFilter(settings.repo), search.request.query});
@@ -47,6 +48,9 @@ PreparedSearch SearchService::prepare(const SearchSettings& settings) const {
 
 SearchStatus SearchService::run(PreparedSearch& search, const std::atomic<bool>* cancelled,
                                 const SearchEvents& events) {
+    for (const std::string& warning : search.warnings) {
+        events.onWarning(warning);
+    }
     for (const RepoIndexError& error : search.damaged) {
         events.onSkipped(error.repo(), error.what());
     }

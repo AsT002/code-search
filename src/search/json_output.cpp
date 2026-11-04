@@ -171,10 +171,20 @@ void JsonResultWriter::skipped(std::string_view repo, std::string_view message) 
     skipped_ += entry;
 }
 
+void JsonResultWriter::warning(std::string_view message) {
+    if (!warnings_.empty()) {
+        warnings_ += ',';
+    }
+    appendString(warnings_, replaceInvalidUtf8(message));
+}
+
 void JsonResultWriter::endFiles() {
     *out_ << (first_ ? "" : "\n") << "]";
     if (!skipped_.empty()) {
         *out_ << ",\"skipped\":[" << skipped_ << "]";
+    }
+    if (!warnings_.empty()) {
+        *out_ << ",\"warnings\":[" << warnings_ << "]";
     }
 }
 

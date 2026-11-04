@@ -37,9 +37,12 @@ struct PreparedSearch {
     SearchRequest request;
     std::vector<OpenRepo> repos;
     std::vector<RepoIndexError> damaged;  // repos left out because their index is damaged
+    std::vector<std::string> warnings;    // from the parser, like a regex that isn't one
 };
 
 struct SearchEvents {
+    // Something in the query that's probably a mistake (ParsedQuery::warnings).
+    std::function<void(const std::string& message)> onWarning;
     // Each matching file, in result order.
     std::function<void(const ResultFile& file)> onFile;
     // A repo left out because its index is damaged. `message` names the
@@ -66,12 +69,11 @@ public:
     // out and listed in `damaged`.
     PreparedSearch prepare(const SearchSettings& settings) const;
 
-    // Runs a prepared search. Reports the repos prepare() left out first,
-    // then calls events.onFile for each result. A repo found damaged during
-    // the search is skipped too, unless it's the last one left: then this
-    // throws IndexFileError. Stops before the next file once `cancelled`
-    // is set.
-    // Static, since it needs nothing from the service: `search` holds it all.
+    // Runs a prepared search. Reports the query's warnings and the repos
+    // prepare() left out first, then calls events.onFile for each result. A repo found damaged
+    // during the search is skipped too, unless it's the last one left: then this throws
+    // IndexFileError. Stops before the next file once `cancelled` is set. Static, since it needs
+    // nothing from the service: `search` holds it all.
     static SearchStatus run(PreparedSearch& search, const std::atomic<bool>* cancelled,
                             const SearchEvents& events);
 

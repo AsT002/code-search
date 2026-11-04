@@ -237,6 +237,45 @@ std::vector<Token> tokenize(std::string_view input) {
     return tokens;
 }
 
+// Characters that do something in a regex, and so would be odd in text.
+bool isRegexSyntax(char c) {
+    return std::string_view("[]()*+?|{}^$").find(c) != std::string_view::npos;
+}
+
+// A warning if `text`, typed plainly as one word, looks like a regex that
+// doesn't start the word: like 4./[x]*/, which is searched as plain text.
+// A path like src/server/ has no regex syntax between its slashes, so it
+// gets none.
+std::optional<std::string> regexInWordWarning(const std::string& text) {
+    const std::size_t slash = text.find('/');
+    if (slash == 0 || slash == std::string::npos || text.size() < slash + 3 || text.back() != '/') {
+        return std::nullopt;
+    }
+    const std::string inner = text.substr(slash + 1, text.size() - slash - 2);
+    bool looksLikeRegex = false;
+    for (const char c : inner) {
+        if (isRegexSyntax(c)) {
+            looksLikeRegex = true;
+        }
+    }
+    if (!looksLikeRegex) {
+        return std::nullopt;
+    }
+    // The fix: the text before the slash, escaped, joined to the regex.
+    std::string fixed = "/";
+    for (const char c : text.substr(0, slash)) {
+        if (isRegexSyntax(c) || c == '.' || c == '/') {
+            fixed += '\\';
+        }
+        fixed += c;
+    }
+    fixed += inner + "/";
+    return text +
+           " is searched as plain text, because a regex has to start the term. "
+           "For a regex, write " +
+           fixed;
+}
+
 // A filter in a word, like "path" and "src/" for path:src/.
 struct Filter {
     std::string name;
@@ -280,7 +319,11 @@ public:
         if (peek().kind == TokenKind::Close) {
             throw QueryError("there's a ) without a matching (");
         }
-        return ParsedQuery{.root = std::move(root), .caseSensitive = caseSensitive_};
+        return ParsedQuery{
+            .root = std::move(root),
+            .caseSensitive = caseSensitive_,
+            .warnings = std::move(warnings_),
+        };
     }
 
 private:
@@ -396,13 +439,19 @@ private:
         return token.forPath ? pathRegex(token.text) : regex(token.text);
     }
 
-    static QueryNode parseWord(const Token& token) {
+    QueryNode parseWord(const Token& token) {
         const std::optional<Filter> filter = filterIn(token);
         if (filter.has_value()) {
             return parseFilter(filter.value());
         }
         if (token.text.empty()) {
             throw QueryError("\"\" is empty. Leave it out, or put text inside the quotes");
+        }
+        // Only for words typed plainly: quotes or a backslash say it's text.
+        if (token.plain) {
+            if (std::optional<std::string> warning = regexInWordWarning(token.text)) {
+                warnings_.push_back(std::move(warning.value()));
+            }
         }
         return literal(token.text);
     }
@@ -441,6 +490,7 @@ private:
     std::size_t next_ = 0;  // the token we're looking at
     int depth_ = 0;
     std::optional<bool> caseSensitive_;
+    std::vector<std::string> warnings_;
 };
 
 }  // namespace

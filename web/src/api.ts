@@ -27,6 +27,8 @@ export interface SearchResponse {
   status: SearchStatus;
   error?: string;
   skipped?: { repo: string; error: string }[];
+  // Things in the query that are probably mistakes, like 4./[x]*/.
+  warnings?: string[];
 }
 
 export interface SearchParams {
