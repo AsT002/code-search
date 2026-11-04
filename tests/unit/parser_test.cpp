@@ -159,17 +159,38 @@ std::vector<std::string> warnings(const std::string& text) {
     return parseQuery(text).warnings;
 }
 
+// The regex a warning for `text` suggests, or "" if there's no warning.
+std::string suggestion(const std::string& text) {
+    const std::vector<std::string> found = warnings(text);
+    if (found.empty()) {
+        return "";
+    }
+    const std::string marker = "For a regex, write ";
+    const std::size_t at = found[0].find(marker);
+    return at == std::string::npos ? "?" : found[0].substr(at + marker.size());
+}
+
 TEST(Parser, WarnsAboutARegexInsideAWord) {
     EXPECT_EQ(warnings("4./[x]*/"),
               std::vector<std::string>{"4./[x]*/ is searched as plain text, because a regex has "
                                        "to start the term. For a regex, write /4\\.[x]*/"});
     // Still searched as typed.
     EXPECT_EQ(parsed("4./[x]*/"), literal("4./[x]*/"));
-    // One warning per word, and the fix escapes the text before the slash.
-    const std::vector<std::string> two = warnings("a.b/(c|d)/ ok x+/y?/");
-    ASSERT_EQ(two.size(), 2U);
-    EXPECT_NE(two[0].find("write /a\\.b(c|d)/"), std::string::npos);
-    EXPECT_NE(two[1].find("write /x\\+y?/"), std::string::npos);
+    // One warning per word.
+    EXPECT_EQ(warnings("a.b/(c|d)/ ok x+/y?/").size(), 2U);
+}
+
+TEST(Parser, ARegexWarningSuggestsTheSameSearch) {
+    EXPECT_EQ(suggestion("a.b/(c|d)/"), "/a\\.b(c|d)/");
+    EXPECT_EQ(suggestion("x+/y?/"), "/x\\+y?/");
+    // A | at the top would cover the text part too, so it's put in a group.
+    EXPECT_EQ(suggestion("x/a|b/"), "/x(?:a|b)/");
+    EXPECT_EQ(suggestion("x/[|]a/"), "/x[|]a/");
+    // The regex is between the last two slashes; earlier ones are text.
+    EXPECT_EQ(suggestion("a/b/[x]*/"), "/a\\/b[x]*/");
+    EXPECT_EQ(suggestion("foo/bar/c+/"), "/foo\\/barc+/");
+    // A backslash in the regex part is part of the regex.
+    EXPECT_EQ(suggestion("id=/\\d+/"), "/id=\\d+/");
 }
 
 TEST(Parser, NoWarningWhenItIsntARegex) {
@@ -184,6 +205,16 @@ TEST(Parser, NoWarningWhenItIsntARegex) {
              "//",
              "x//",
              "a/b",
+             // Globs and framework folder names.
+             "packages/*/",
+             "src/**/",
+             "x/{a,b}/",
+             "app/(auth)/",
+             "pages/[id]/",
+             "pages/[...slug]/",
+             "x/+y/",
+             // Not a regex RE2 can compile.
+             "x/(a/",
          }) {
         SCOPED_TRACE(text);
         EXPECT_TRUE(warnings(text).empty());

@@ -497,7 +497,7 @@ is a breaking change.
 | What's highlighted | The text in the parts of the query that matched: not under a `-`, and not in an `or` branch that didn't match |
 | `path:` and `file:` | Substring of the file's path, with the query's case rule. `path:/re/` and `file:/re/` take a regex |
 | `/re/` | A regex in RE2 syntax (never `std::regex`), so no pattern can make a search slow. A match never spans lines, as with grep: `\n` never matches, and `[^x]+` and `\C+` stop at a line's end. `^` and `$` match at each line; `$` is before the LF, so with CRLF it's after the CR (use `\r?$`). Without `case:yes`, RE2 folds case its own way, non-ASCII letters too (unlike text, which folds only ASCII). Backslashes reach RE2 as typed, except `\/`, which stands for `/` |
-| What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message. A plain word that ends in `/.../` with regex syntax inside (`[](){}*+?|^$`), like `4./[x]*/`, is still text, but gets a warning that suggests the regex (`/4\.[x]*/`). Paths like `src/server/` don't |
+| What makes a regex | A word that starts with `/`, up to the first `/` after it that's followed by a space, `)` or the end. If there's none, or the pattern would be empty, it's text: `/usr/bin` and `// TODO` search for those words, and `// /foo/` is `//` and the regex `foo`. A regex RE2 can't compile is an error with RE2's message. A word that ends in `/.../` with regex syntax inside (`[](){}*+?|^$\`) that RE2 compiles, like `4./[x]*/`, is still text, but gets a warning that suggests the regex (`/4\.[x]*/`). The regex part is between the last two slashes; the text before it is escaped, and a top-level `|` is put in `(?:...)`, so `x/a|b/` suggests `/x(?:a|b)/`. No warning if the text part is quoted or has a backslash, or for paths and globs: `src/server/`, `src/**/`, `packages/*/`, `x/{a,b}/`, `app/(auth)/`, `pages/[id]/` |
 | Regex matches | The leftmost match, then the next one after it, like grep. An empty match makes the file match, but only non-empty matches are highlighted: `/x*/` matches every file. For a pathological regex and file, after a time limit only the first match in each line is highlighted (see Regex below) |
 | `lang:` | The language from the file name (extension, or names like `Makefile`). Names and aliases are case-insensitive: `lang:c++` is `lang:cpp`. An unknown language is an error |
 | `repo:` | Exact repo name. A name that isn't added is an error. Not allowed with `--path` |
@@ -806,8 +806,9 @@ Errors:
   indexes. Once results are being sent the status is 200, and an error ends the
   document with `"status":"error"`, as in the CLI.
 - Everything else: `{"error":{"code":"...","message":"..."}}`. 400
-  `bad_request`, 403 `forbidden`, 404 `not_found` or `unknown_repo`, 413 for a
-  body over 64 KiB, 415 `unsupported_media_type`, 422 `failed` when a change
+  `bad_request`, 403 `forbidden` (also for a link in the UI folder that leads
+  outside it), 404 `not_found` or `unknown_repo`, 405 `method_not_allowed`,
+  413 `payload_too_large` for a body over 64 KiB, 415 `unsupported_media_type`, 422 `failed` when a change
   couldn't be made (the message says why: not a Git repo, name taken, Git
   failed), 500 `damaged` when a file can't be read from a damaged index (the
   message says how to rebuild it), 500 `internal`.
@@ -838,6 +839,11 @@ Requests a web page on another site could send are turned away:
   stops DNS rebinding, where a site points its own name at 127.0.0.1 to read
   the answers.
 - An `Origin` header, if there is one, must be this server's.
+- For `/api/`, a `Sec-Fetch-Site` header, if there is one, must be
+  `same-origin` or `none`. Browsers send it with every request, so this also
+  stops `<img src=...>` on another site, which sends no `Origin`, from
+  starting searches. It couldn't read the answers, but the server would do
+  the work.
 - A `POST` must have `Content-Type: application/json`. An HTML form can't send
   that, and a script on another site would have to ask first (a CORS
   preflight), which the server never allows.

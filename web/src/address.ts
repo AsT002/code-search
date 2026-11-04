@@ -27,12 +27,20 @@ export interface Address {
   open: OpenFile | null;
 }
 
+// The whole number in `text`, like "12", or null if it isn't one: "",
+// "-1", "1.5" and "1e3" aren't.
+export function countIn(text: string): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const count = Number(trimmed);
+  return Number.isSafeInteger(count) ? count : null;
+}
+
 export function readAddress(search: string): Address {
   const address = new URLSearchParams(search);
-  const count = (name: string, fallback: number) => {
-    const value = Number(address.get(name));
-    return Number.isInteger(value) && value >= 0 && address.has(name) ? value : fallback;
-  };
+  const count = (name: string, fallback: number) => countIn(address.get(name) ?? "") ?? fallback;
   const params: SearchParams = {
     query: address.get("q") ?? "",
     repo: address.get("repo") ?? "",

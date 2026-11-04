@@ -78,6 +78,12 @@ TEST(IndexCache, ForgetsFilesThatAreNotCurrent) {
     cache.get(b, opener(b, opens));
     cache.forgetOthers({b});
     EXPECT_EQ(cache.size(), 1U);
+    // b is still open, and a is opened again.
+    cache.get(b, opener(b, opens));
+    EXPECT_EQ(opens, 2);
+    const std::shared_ptr<ShardReader> reopened = cache.get(a, opener(a, opens));
+    EXPECT_EQ(opens, 3);
+    EXPECT_NE(reopened, inUse);
     // A search still using the old file can go on reading it.
     EXPECT_EQ(inUse->docCount(), 1U);
 }

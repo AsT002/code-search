@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { DEFAULTS, addressFor, readAddress } from "./address";
+import { DEFAULTS, addressFor, countIn, readAddress } from "./address";
 
 describe("address", () => {
   test("a search and an open file read back the same", () => {
@@ -24,5 +24,15 @@ describe("address", () => {
     expect(readAddress("?file_repo=r&file=a.c&line=0").open?.line).toBeNull();
     expect(readAddress("?file=a.c&line=3").open).toBeNull();
     expect(readAddress("?file_repo=&file=a.c").open).toBeNull();
+  });
+});
+
+describe("countIn", () => {
+  test("only a whole number counts, so clearing a box isn't 0", () => {
+    expect(countIn("0")).toBe(0);
+    expect(countIn(" 50 ")).toBe(50);
+    for (const text of ["", " ", "-1", "1.5", "1e3", "abc", "99999999999999999999"]) {
+      expect(countIn(text)).toBeNull();
+    }
   });
 });

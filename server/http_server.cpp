@@ -222,6 +222,22 @@ npm --prefix web run build</pre>
 // Runs a change to the repos, and answers its errors: 404 for a repo that
 // isn't added, 422 for anything else that stopped it, like a folder that
 // isn't a Git repo or a name that's taken. The message says which.
+// The error code for an HTTP status httplib answers with itself.
+std::string_view errorCode(int status) {
+    switch (status) {
+        case 403:
+            return "forbidden";  // like a link in the UI folder to outside it
+        case 404:
+            return "not_found";
+        case 405:
+            return "method_not_allowed";
+        case 413:
+            return "payload_too_large";
+        default:
+            return status >= 500 ? "internal" : "bad_request";
+    }
+}
+
 void change(httplib::Response& res, const std::function<void()>& work) {
     try {
         work();
@@ -250,8 +266,10 @@ struct RunningSearch {
 // little.
 class Watchdog {
 public:
-    Watchdog()
-        : thread_([this] {
+    // `onClientGone` (may be empty) is called when a search is cancelled
+    // because its client went away.
+    explicit Watchdog(std::function<void()> onClientGone)
+        : onClientGone_(std::move(onClientGone)), thread_([this] {
               loop();
           }) {}
 
@@ -269,8 +287,13 @@ public:
     Watchdog(Watchdog&&) = delete;
     Watchdog& operator=(Watchdog&&) = delete;
 
+    // A search added after cancelAll() is cancelled at once. Both take the
+    // lock, so a search starting while the server stops can't miss it.
     void add(RunningSearch* search) {
         const std::scoped_lock lock(mutex_);
+        if (cancelledAll_) {
+            search->cancelled = true;
+        }
         searches_.push_back(search);
     }
 
@@ -282,8 +305,10 @@ public:
         std::erase(searches_, search);
     }
 
+    // Cancels every search, now and later: the server is stopping.
     void cancelAll() {
         const std::scoped_lock lock(mutex_);
+        cancelledAll_ = true;
         for (RunningSearch* search : searches_) {
             search->cancelled = true;
         }
@@ -297,8 +322,11 @@ private:
                 if (std::chrono::steady_clock::now() >= search->deadline) {
                     search->timedOut = true;
                     search->cancelled = true;
-                } else if (search->connectionClosed()) {
+                } else if (!search->cancelled && search->connectionClosed()) {
                     search->cancelled = true;
+                    if (onClientGone_) {
+                        onClientGone_();
+                    }
                 }
             }
             // Sleeps 50 ms, or less if the destructor wakes it.
@@ -310,7 +338,9 @@ private:
 
     std::mutex mutex_;
     std::condition_variable wake_;
-    bool stopping_ = false;
+    bool stopping_ = false;      // the destructor is running
+    bool cancelledAll_ = false;  // cancelAll() was called
+    std::function<void()> onClientGone_;
     std::vector<RunningSearch*> searches_;
     std::thread thread_;  // last, so it starts after the members it uses
 };
@@ -324,9 +354,10 @@ class HttpServer::Impl {
 public:
     explicit Impl(ServerConfig config)
         : config_(std::move(config)),
-          pool_(startPool()),
+          pool_(startPool(config_.searchThreads)),
           cache_(config_.maxOpenIndexes),
-          service_(config_.workspace, pool_.get(), &cache_) {
+          service_(config_.workspace, pool_.get(), &cache_),
+          watchdog_(config_.onClientGone) {
         setUp();
     }
 
@@ -436,8 +467,8 @@ void HttpServer::Impl::setUp() {
     // version of set_error_handler that takes a handler returning nothing.
     server_.set_error_handler([](const httplib::Request& /*req*/, httplib::Response& res) {
         if (res.body.empty()) {
-            const std::string code = res.status == 404 ? "not_found" : "bad_request";
-            sendError(res, res.status, code, httplib::status_message(res.status));
+            sendError(res, res.status, std::string(errorCode(res.status)),
+                      httplib::status_message(res.status));
         }
         return httplib::Server::HandlerResponse::Handled;
     });
@@ -484,6 +515,11 @@ void HttpServer::Impl::setUp() {
 //   point its own name at 127.0.0.1 (DNS rebinding) and read the answers.
 // - An Origin, which browsers send with cross-site requests, must be this
 //   server's own.
+// - For the API, Sec-Fetch-Site, which browsers send with every request,
+//   must say it came from this server's own pages, or was typed in. A page
+//   elsewhere could otherwise start searches with <img src=...>, which
+//   sends no Origin. It couldn't read the answer, but the server would do
+//   the work. Programs like curl don't send it.
 // - A POST must send JSON. A plain HTML form on another site can't, and a
 //   script there would first have to ask, which this server never allows.
 httplib::Server::HandlerResponse HttpServer::Impl::checkRequest(const httplib::Request& req,
@@ -497,6 +533,13 @@ httplib::Server::HandlerResponse HttpServer::Impl::checkRequest(const httplib::R
     if (req.has_header("Origin")) {
         const std::string origin = req.get_header_value("Origin");
         if (origin != "http://127.0.0.1:" + port && origin != "http://localhost:" + port) {
+            sendError(res, 403, "forbidden", "requests from other sites aren't allowed");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+    }
+    if (req.path.starts_with("/api/") && req.has_header("Sec-Fetch-Site")) {
+        const std::string site = req.get_header_value("Sec-Fetch-Site");
+        if (site != "same-origin" && site != "none") {
             sendError(res, 403, "forbidden", "requests from other sites aren't allowed");
             return httplib::Server::HandlerResponse::Handled;
         }
@@ -560,8 +603,7 @@ void HttpServer::Impl::streamSearch(PreparedSearch& search,
     RunningSearch running;
     running.deadline = std::chrono::steady_clock::now() + config_.searchTimeout;
     running.connectionClosed = connectionClosed;
-    running.cancelled = stopping_.load();  // the server may have stopped since the request came
-    watchdog_.add(&running);
+    watchdog_.add(&running);  // cancels it at once if the server is stopping
 
     std::ostringstream out;
     JsonResultWriter writer(out);
@@ -665,7 +707,8 @@ void HttpServer::Impl::showFile(const httplib::Request& req, httplib::Response& 
     } catch (const UnknownRepoError& error) {
         sendError(res, 404, "unknown_repo", error.what());
     } catch (const RepoIndexError& error) {
-        sendError(res, 500, "damaged", error.what() + rebuildHint(error.repo()));
+        // openRepos already says how to rebuild it.
+        sendError(res, 500, "damaged", error.what());
     } catch (const std::exception& error) {
         sendError(res, 500, "internal", error.what());
     }

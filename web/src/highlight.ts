@@ -65,7 +65,9 @@ export function segments(bytes: Uint8Array, matches: Match[]): Segment[] {
     }
   }
 
-  const decoder = new TextDecoder(); // replaces bad bytes with U+FFFD
+  // Replaces bad bytes with U+FFFD. ignoreBOM keeps a U+FEFF that starts a
+  // piece, which would otherwise be dropped.
+  const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const decode = (start: number, end: number) => decoder.decode(bytes.subarray(start, end));
   const out: Segment[] = [];
   let position = 0;

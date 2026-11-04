@@ -39,7 +39,8 @@ struct Token {
     bool plain = true;
     // For Regex: the pattern is for the path (path:/x/ or file:/x/).
     bool forPath = false;
-    // For Regex: the token as typed, like path:/a\/b/, for error messages.
+    // The token as typed, like path:/a\/b/ or "a"b: for a regex, for error
+    // messages; for a word, to warn about a regex inside it.
     std::string typed;
 };
 
@@ -76,6 +77,7 @@ void readQuoted(std::string_view input, std::size_t& pos, std::string& out) {
 // ')' that closes it, so "printf(" and "f(x)" are words. Any other ')' ends
 // the word and closes a group.
 Token readWord(std::string_view input, std::size_t& pos) {
+    const std::size_t start = pos;
     Token token{.kind = TokenKind::Word, .text = "", .plainPrefix = 0, .plain = true};
     bool allPlain = true;  // nothing quoted or escaped so far
     int openParens = 0;
@@ -111,6 +113,7 @@ Token readWord(std::string_view input, std::size_t& pos) {
         }
     }
     token.plain = allPlain;
+    token.typed = std::string(input.substr(start, pos - start));
     return token;
 }
 
@@ -239,38 +242,99 @@ std::vector<Token> tokenize(std::string_view input) {
 
 // Characters that do something in a regex, and so would be odd in text.
 bool isRegexSyntax(char c) {
-    return std::string_view("[]()*+?|{}^$").find(c) != std::string_view::npos;
+    return std::string_view("[]()*+?|{}^$\\").find(c) != std::string_view::npos;
 }
 
-// A warning if `text`, typed plainly as one word, looks like a regex that
-// doesn't start the word: like 4./[x]*/, which is searched as plain text.
-// A path like src/server/ has no regex syntax between its slashes, so it
-// gets none.
-std::optional<std::string> regexInWordWarning(const std::string& text) {
-    const std::size_t slash = text.find('/');
-    if (slash == 0 || slash == std::string::npos || text.size() < slash + 3 || text.back() != '/') {
-        return std::nullopt;
+// A path part that only looks like a regex: a glob like * or ** or {a,b},
+// or a folder name like (auth) or [id], as some web frameworks use.
+bool looksLikeAPathPart(std::string_view part) {
+    if (part.empty() || std::string_view("*+?{").find(part.front()) != std::string_view::npos) {
+        return true;
     }
-    const std::string inner = text.substr(slash + 1, text.size() - slash - 2);
-    bool looksLikeRegex = false;
-    for (const char c : inner) {
-        if (isRegexSyntax(c)) {
-            looksLikeRegex = true;
+    const bool wrapped =
+        (part.front() == '(' && part.back() == ')') || (part.front() == '[' && part.back() == ']');
+    if (!wrapped || part.size() < 3) {
+        return false;
+    }
+    for (const char c : part.substr(1, part.size() - 2)) {
+        const bool nameChar = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!nameChar) {
+            return false;
         }
     }
-    if (!looksLikeRegex) {
+    return true;
+}
+
+// Whether a regex has a | outside any ( ) or [ ], like a|b but not (a|b).
+bool hasTopLevelOr(std::string_view pattern) {
+    int depth = 0;
+    bool inClass = false;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        const char c = pattern[i];
+        if (c == '\\') {
+            ++i;  // the next character is escaped
+        } else if (inClass) {
+            inClass = c != ']';
+        } else if (c == '[') {
+            inClass = true;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+        } else if (c == '|' && depth == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// A warning if `typed`, a plain word as the user typed it, ends in what
+// looks like a regex that doesn't start the word: like 4./[x]*/, which is
+// searched as plain text. The regex part is between the last two slashes.
+// A path like src/server/ or a glob like src/**/ gets none.
+std::optional<std::string> regexInWordWarning(std::string_view typed) {
+    if (typed.size() < 4 || typed.back() != '/' || typed.front() == '/') {
         return std::nullopt;
     }
-    // The fix: the text before the slash, escaped, joined to the regex.
+    const std::size_t slash = typed.rfind('/', typed.size() - 2);
+    if (slash == std::string_view::npos || slash == 0) {
+        return std::nullopt;
+    }
+    const std::string_view before = typed.substr(0, slash);
+    const std::string_view pattern = typed.substr(slash + 1, typed.size() - slash - 2);
+    // Quotes or a backslash in the text part say it's meant as text.
+    if (before.find_first_of("\"\\") != std::string_view::npos ||
+        typed.find('"') != std::string_view::npos) {
+        return std::nullopt;
+    }
+    bool hasSyntax = false;
+    for (const char c : pattern) {
+        if (isRegexSyntax(c)) {
+            hasSyntax = true;
+        }
+    }
+    if (!hasSyntax || looksLikeAPathPart(pattern) ||
+        RegexMatcher::problemWith(pattern).has_value()) {
+        return std::nullopt;
+    }
+
+    // The fix: the text part, escaped, then the regex. A regex with | is
+    // put in a group, so x/a|b/ stays x(a|b), not xa or b.
     std::string fixed = "/";
-    for (const char c : text.substr(0, slash)) {
-        if (isRegexSyntax(c) || c == '.' || c == '/') {
+    for (const char c : before) {
+        if (c == '/') {
+            fixed += "\\/";
+            continue;
+        }
+        if (isRegexSyntax(c) || c == '.') {
             fixed += '\\';
         }
         fixed += c;
     }
-    fixed += inner + "/";
-    return text +
+    fixed += hasTopLevelOr(pattern) ? "(?:" + std::string(pattern) + ")" : std::string(pattern);
+    fixed += '/';
+    return std::string(typed) +
            " is searched as plain text, because a regex has to start the term. "
            "For a regex, write " +
            fixed;
@@ -447,11 +511,8 @@ private:
         if (token.text.empty()) {
             throw QueryError("\"\" is empty. Leave it out, or put text inside the quotes");
         }
-        // Only for words typed plainly: quotes or a backslash say it's text.
-        if (token.plain) {
-            if (std::optional<std::string> warning = regexInWordWarning(token.text)) {
-                warnings_.push_back(std::move(warning.value()));
-            }
+        if (std::optional<std::string> warning = regexInWordWarning(token.typed)) {
+            warnings_.push_back(std::move(warning.value()));
         }
         return literal(token.text);
     }

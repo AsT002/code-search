@@ -1,9 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 
-import { addressFor, readAddress, sameParams, type OpenFile } from "./address";
+import { addressFor, countIn, readAddress, sameParams, type OpenFile } from "./address";
 import { listRepos, search, type Repo, type SearchParams, type SearchResponse } from "./api";
 import { FileView } from "./FileView";
-import { Results, type LinkProps } from "./Results";
+import { Results, type LinkFor, type LinkProps } from "./Results";
 
 // Waits this long after the last key press before searching.
 const TYPING_DELAY_MS = 250;
@@ -23,6 +23,9 @@ interface HistoryState {
 export function App() {
   const [params, setParams] = useState<SearchParams>(() => readAddress(window.location.search).params);
   const [open, setOpen] = useState<OpenFile | null>(() => readAddress(window.location.search).open);
+  // Whether the file view should scroll to open.line. Not when the line
+  // was picked by clicking it, which would move the text under the mouse.
+  const [jump, setJump] = useState(true);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [reposError, setReposError] = useState("");
   const [response, setResponse] = useState<SearchResponse | null>(null);
@@ -33,16 +36,32 @@ export function App() {
   const running = useRef<AbortController | null>(null);
   // Where the results were scrolled to when a file was opened.
   const resultsScroll = useRef(0);
+  // The latest params and open file, for the link callbacks below, which
+  // stay the same between renders so result lines needn't render again.
+  const paramsRef = useRef(params);
+  paramsRef.current = params;
+  const openRef = useRef(open);
+  openRef.current = open;
 
   useEffect(() => {
     listRepos().then(setRepos, (error: unknown) => setReposError(String(error)));
+  }, []);
+
+  // The page scrolls itself: to a file's line, or back to where the
+  // results were.
+  useEffect(() => {
+    window.history.scrollRestoration = "manual";
   }, []);
 
   // The back and forward buttons: show what the address says.
   useEffect(() => {
     const onPopState = () => {
       const address = readAddress(window.location.search);
+      if (openRef.current === null && address.open !== null) {
+        resultsScroll.current = window.scrollY; // leaving the results, like with Forward
+      }
       setOpen(address.open);
+      setJump(true);
       setParams((current) => (sameParams(current, address.params) ? current : address.params));
     };
     window.addEventListener("popstate", onPopState);
@@ -93,24 +112,33 @@ export function App() {
   }, [params]);
 
   // A link to a file. From the results it adds a history entry, so Back
-  // returns to them; inside a file, picking another line replaces it.
-  const linkTo = (target: OpenFile, replace: boolean): LinkProps => ({
-    href: addressFor(params, target),
-    onClick: (event) => {
-      if (!plainClick(event)) {
-        return;
-      }
-      event.preventDefault();
-      if (replace) {
-        window.history.replaceState(window.history.state, "", addressFor(params, target));
-      } else {
-        resultsScroll.current = window.scrollY;
-        const state: HistoryState = { fromResults: true };
-        window.history.pushState(state, "", addressFor(params, target));
-      }
-      setOpen(target);
-    },
-  });
+  // returns to them; inside a file, picking another line replaces it. The
+  // href is made from the search when the line renders; a click uses the
+  // search as it is then.
+  const linkTo = useCallback((target: OpenFile, replace: boolean): LinkProps => {
+    return {
+      href: addressFor(paramsRef.current, target),
+      onClick: (event) => {
+        if (!plainClick(event)) {
+          return;
+        }
+        event.preventDefault();
+        const address = addressFor(paramsRef.current, target);
+        if (replace) {
+          window.history.replaceState(window.history.state, "", address);
+          setJump(false);
+        } else {
+          resultsScroll.current = window.scrollY;
+          const state: HistoryState = { fromResults: true };
+          window.history.pushState(state, "", address);
+          setJump(true);
+        }
+        setOpen(target);
+      },
+    };
+  }, []);
+  const resultLink = useCallback<LinkFor>((target) => linkTo(target, false), [linkTo]);
+  const lineLink = useCallback<LinkFor>((target) => linkTo(target, true), [linkTo]);
 
   const back: LinkProps = {
     href: addressFor(params, null),
@@ -184,22 +212,11 @@ export function App() {
             </label>
             <label>
               Context{" "}
-              <input
-                type="number"
-                min={0}
-                max={20}
-                value={params.context}
-                onChange={(event) => update({ context: Math.max(0, Math.trunc(Number(event.target.value))) })}
-              />
+              <CountInput value={params.context} max={20} onChange={(context) => update({ context })} />
             </label>
             <label>
               Limit{" "}
-              <input
-                type="number"
-                min={0}
-                value={params.maxResults}
-                onChange={(event) => update({ maxResults: Math.max(0, Math.trunc(Number(event.target.value))) })}
-              />
+              <CountInput value={params.maxResults} onChange={(maxResults) => update({ maxResults })} />
             </label>
             {searching && <span className="searching">Searching…</span>}
           </div>
@@ -207,19 +224,44 @@ export function App() {
         {reposError !== "" && <p className="error">Could not list the repos: {reposError}</p>}
       </header>
       <main>
-        {open !== null && (
-          <FileView open={open} linkFor={(target) => linkTo(target, true)} back={back} />
-        )}
-        {open === null && response === null && <Help />}
-        {open === null && response !== null && (
-          <Results
-            response={response}
-            filesOnly={shownParams.filesOnly}
-            linkFor={(target) => linkTo(target, false)}
-          />
-        )}
+        {open !== null && <FileView open={open} jump={jump} linkFor={lineLink} back={back} />}
+        {/* Kept while a file is open, only hidden, so going back is instant. */}
+        <div hidden={open !== null}>
+          {response === null ? (
+            <Help />
+          ) : (
+            <Results response={response} filesOnly={shownParams.filesOnly} linkFor={resultLink} />
+          )}
+        </div>
       </main>
     </div>
+  );
+}
+
+// A whole number, 0 or more. What's typed is kept as text, and only a
+// whole number is passed on: clearing the box to type another number
+// mustn't search with 0, which for the limit means no limit at all.
+function CountInput({ value, max, onChange }: { value: number; max?: number; onChange: (value: number) => void }) {
+  const [text, setText] = useState(String(value));
+  // Follow changes from elsewhere, like the back button.
+  useEffect(() => {
+    setText((current) => (countIn(current) === value ? current : String(value)));
+  }, [value]);
+  return (
+    <input
+      type="number"
+      min={0}
+      max={max}
+      value={text}
+      onChange={(event) => {
+        setText(event.target.value);
+        const count = countIn(event.target.value);
+        if (count !== null && count !== value) {
+          onChange(count);
+        }
+      }}
+      onBlur={() => setText(String(value))}
+    />
   );
 }
 

@@ -204,6 +204,26 @@ TEST_F(ServerTest, ShowsAWholeFile) {
     EXPECT_TRUE(Json::parse(result->body)["lines"][0].contains("text_base64"));
 }
 
+TEST_F(ServerTest, SaysWhenAFileIsInADamagedIndex) {
+    const RunningServer server(config());
+    const Registry registry = loadRegistry(workspace());
+    const RepoEntry* alpha = registry.find("alpha");
+    ASSERT_NE(alpha, nullptr);
+    testing::writeFile(workspace().indexesDir() / alpha->index.file, "not an index");
+
+    const httplib::Result result = server.client().Get(
+        "/api/v1/file", {{"repo", "alpha"}, {"path", "a.txt"}}, httplib::Headers{});
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 500);
+    const Json error = Json::parse(result->body)["error"];
+    EXPECT_EQ(error["code"], "damaged");
+    // The rebuild hint, once.
+    const std::string message = error["message"];
+    const std::string hint = "code-search update alpha --rebuild";
+    ASSERT_NE(message.find(hint), std::string::npos) << message;
+    EXPECT_EQ(message.find(hint), message.rfind(hint)) << message;
+}
+
 TEST_F(ServerTest, ExplainsAFileItCantShow) {
     const RunningServer server(config());
     httplib::Client client = server.client();
@@ -337,6 +357,22 @@ TEST_F(ServerTest, TurnsAwayRequestsFromOtherSites) {
     ASSERT_TRUE(result);
     EXPECT_EQ(result->status, 403);
 
+    // <img src=...> on another site sends no Origin, but Sec-Fetch-Site.
+    for (const std::string site : {"cross-site", "same-site"}) {
+        result = client.Get("/api/v1/search?q=x", httplib::Headers{{"Sec-Fetch-Site", site}});
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, 403) << site;
+    }
+    for (const std::string site : {"same-origin", "none"}) {
+        result = client.Get("/api/v1/version", httplib::Headers{{"Sec-Fetch-Site", site}});
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, 200) << site;
+    }
+    // A link to the UI from another site still opens it.
+    result = client.Get("/", httplib::Headers{{"Sec-Fetch-Site", "cross-site"}});
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status, 200);
+
     // An HTML form can only send these types, so changes need JSON.
     for (const std::string type :
          {"text/plain", "application/x-www-form-urlencoded", "multipart/form-data"}) {
@@ -363,6 +399,7 @@ TEST_F(ServerTest, LimitsTheRequestBody) {
     const httplib::Result result = server.client().Post("/api/v1/repos", big, "application/json");
     ASSERT_TRUE(result);
     EXPECT_EQ(result->status, 413);
+    EXPECT_EQ(Json::parse(result->body)["error"]["code"], "payload_too_large");
 }
 
 TEST_F(ServerTest, SendsSafetyHeaders) {
@@ -391,6 +428,39 @@ TEST_F(ServerTest, ServesTheUiFolder) {
     EXPECT_EQ(server.client().Get("/api/v1/version")->status, 200);
 }
 
+TEST_F(ServerTest, ServesNothingOutsideTheUiFolder) {
+    const TempDir dir;
+    testing::writeFile(dir.file("secret.txt"), "secret");
+    std::filesystem::create_directories(dir.file("ui"));
+    testing::writeFile(dir.file("ui/index.html"), "ui");
+    std::filesystem::create_symlink(dir.file("secret.txt"), dir.file("ui/link.txt"));
+    ServerConfig settings = config();
+    settings.uiDir = dir.file("ui");
+    const RunningServer server(std::move(settings));
+    httplib::Client client = server.client();
+
+    for (const std::string path : {
+             "/../secret.txt",
+             "/%2e%2e/secret.txt",
+             "/..%2fsecret.txt",
+             "/..%5csecret.txt",
+             "/x/../../secret.txt",
+             "//secret.txt",
+         }) {
+        SCOPED_TRACE(path);
+        const httplib::Result result = client.Get(path);
+        ASSERT_TRUE(result);
+        EXPECT_EQ(result->status, 404);
+        EXPECT_EQ(result->body.find("secret\""), std::string::npos);
+        EXPECT_EQ(Json::parse(result->body)["error"]["code"], "not_found");
+    }
+    // A link inside the folder to a file outside it isn't followed.
+    const httplib::Result link = client.Get("/link.txt");
+    ASSERT_TRUE(link);
+    EXPECT_EQ(link->status, 403);
+    EXPECT_EQ(Json::parse(link->body)["error"]["code"], "forbidden");
+}
+
 TEST_F(ServerTest, ExplainsAMissingUi) {
     const RunningServer server(config());
     const httplib::Result result = server.client().Get("/");
@@ -408,6 +478,12 @@ public:
         changed_.wait(lock, [this] {
             return open_;
         });
+    }
+    // Marks it reached without waiting, for a gate that's only watched.
+    void reach() {
+        const std::scoped_lock lock(mutex_);
+        reached_ = true;
+        changed_.notify_all();
     }
     void waitUntilReached() {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -470,6 +546,10 @@ TEST_F(ServerTest, StopsASearchWhenTheClientGoesAway) {
     settings.onSearchDone = [&](std::string_view status) {
         statuses.add(status);
     };
+    Gate noticed;  // the watchdog saw the client go
+    settings.onClientGone = [&] {
+        noticed.reach();
+    };
     const RunningServer server(std::move(settings));
 
     // The client gives up waiting and closes the connection.
@@ -480,12 +560,10 @@ TEST_F(ServerTest, StopsASearchWhenTheClientGoesAway) {
     });
     gate.waitUntilReached();
     request.join();
-    // Give the watchdog, which looks every 50 ms, time to see it.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    noticed.waitUntilReached();
     gate.open();
 
-    const std::string status = statuses.waitForOne();
-    EXPECT_TRUE(status == "cancelled" || status == "disconnected") << status;
+    EXPECT_EQ(statuses.waitForOne(), "cancelled");
     EXPECT_LT(filesSent, 200);
 }
 
@@ -516,11 +594,23 @@ TEST_F(ServerTest, StopsASearchThatTakesTooLong) {
 }
 
 TEST_F(ServerTest, ASearchKeepsItsSnapshotWhileAnUpdateRuns) {
-    // What the search should give: alpha as it is now.
-    const std::string before = cliSearch({"--repo", "alpha", "target"}).out;
+    // More files than a search on 2 threads reads ahead of the results
+    // it's sent (2 x 4 chunks of up to 16 files), so most are read after
+    // the update below.
+    TempRepo many;
+    for (int i = 0; i < 500; ++i) {
+        many.write("f" + std::to_string(10000 + i) + ".txt", "target\n");
+    }
+    many.commit();
+    RepoManager(workspace(), noGitHub()).add(many.dir().string(), "many");
+    const std::filesystem::path oldIndex =
+        workspace().indexesDir() / loadRegistry(workspace()).find("many")->index.file;
+    // What the search should give: the repo as it is now.
+    const std::string before = cliSearch({"--repo", "many", "target"}).out;
 
     Gate gate;
     ServerConfig settings = config();
+    settings.searchThreads = 2;
     std::atomic<int> filesSent = 0;
     settings.beforeResultFile = [&] {
         if (++filesSent == 1) {
@@ -531,29 +621,30 @@ TEST_F(ServerTest, ASearchKeepsItsSnapshotWhileAnUpdateRuns) {
 
     std::string during;
     std::thread request([&] {
-        const httplib::Result result = server.client().Get("/api/v1/search?q=target&repo=alpha");
+        const httplib::Result result = server.client().Get("/api/v1/search?q=target&repo=many");
         ASSERT_TRUE(result);
         during = result->body;
     });
     gate.waitUntilReached();
 
-    // Change alpha and update it while the search is partway. The update
-    // deletes the index file the search has open.
-    alpha().write("a.txt", "no longer matching\n");
-    alpha().write("new.txt", "a new target\n");
-    alpha().commit();
-    const UpdateResult updated = RepoManager(workspace(), noGitHub()).update("alpha", false);
+    // Change the repo and update it while the search is partway. The
+    // update deletes the index file the search has open.
+    many.write("f10000.txt", "no longer matching\n");
+    many.write("new.txt", "a new target\n");
+    many.commit();
+    const UpdateResult updated = RepoManager(workspace(), noGitHub()).update("many", false);
     EXPECT_FALSE(updated.reason.empty());
+    EXPECT_FALSE(std::filesystem::exists(oldIndex));
     gate.open();
     request.join();
 
     EXPECT_EQ(during, before);
     // A new search sees the update, not the file the cache had open.
-    const httplib::Result after = server.client().Get("/api/v1/search?q=target&repo=alpha");
+    const httplib::Result after = server.client().Get("/api/v1/search?q=target&repo=many");
     ASSERT_TRUE(after);
-    EXPECT_EQ(after->body, cliSearch({"--repo", "alpha", "target"}).out);
+    EXPECT_EQ(after->body, cliSearch({"--repo", "many", "target"}).out);
     EXPECT_NE(after->body.find("new.txt"), std::string::npos);
-    EXPECT_EQ(after->body.find("\"a.txt\""), std::string::npos);
+    EXPECT_EQ(after->body.find("\"f10000.txt\""), std::string::npos);
 }
 
 TEST_F(ServerTest, AnswersSearchesAtTheSameTime) {

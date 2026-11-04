@@ -73,3 +73,14 @@ describe("lineBytes", () => {
     ]);
   });
 });
+
+describe("byte order marks", () => {
+  test("a U+FEFF inside a line is kept, matched or not", () => {
+    const bytes = new Uint8Array([0x61, 0xef, 0xbb, 0xbf, 0x62]); // a, U+FEFF, b
+    expect(segments(bytes, [{ start: 1, end: 5 }])).toEqual([
+      { text: "a", match: false },
+      { text: "﻿b", match: true },
+    ]);
+    expect(segments(new Uint8Array([0xef, 0xbb, 0xbf, 0x78]), [])).toEqual([{ text: "﻿x", match: false }]);
+  });
+});

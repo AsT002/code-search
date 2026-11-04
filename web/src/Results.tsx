@@ -2,7 +2,7 @@
 // React text node, which React escapes, so file content can never become
 // HTML. Nothing here may use dangerouslySetInnerHTML.
 
-import { useMemo, type MouseEvent, type ReactNode } from "react";
+import { memo, useMemo, type MouseEvent, type ReactNode } from "react";
 
 import type { OpenFile } from "./address";
 import type { ResultFile, ResultLine, SearchResponse } from "./api";
@@ -29,21 +29,28 @@ function followUnlessSelecting(link: LinkProps) {
   };
 }
 
-export function LineView({
+// One line. memo: it renders again only when its props change, so typing
+// in the search box or picking another line doesn't redraw every line.
+export const LineView = memo(function LineView({
   line,
   painted,
-  link,
+  repo = "",
+  path = "",
+  linkFor,
   fadeContext = true,
   selected = false,
   anchor = false,
 }: {
   line: ResultLine;
   painted: PaintedSegment[];
-  link?: LinkProps; // where clicking the line goes
+  repo?: string; // with path and linkFor: clicking the line opens it there
+  path?: string;
+  linkFor?: LinkFor;
   fadeContext?: boolean; // show lines without matches faded, as context
   selected?: boolean; // the line a file was opened at
   anchor?: boolean; // give the line an id, L<number>, to scroll to
 }) {
+  const link = linkFor?.({ repo, path, line: line.line });
   let className = "line";
   if (line.matches.length > 0) {
     className += " match-line";
@@ -77,7 +84,7 @@ export function LineView({
       </code>
     </div>
   );
-}
+});
 
 // Each line's match segments, with syntax colors inside them. Lines that
 // follow each other in the file are colored as one block.
@@ -111,7 +118,7 @@ function canLink(file: ResultFile): boolean {
   return file.repo !== "" && file.path_base64 === undefined;
 }
 
-export function FileResult({ file, linkFor }: { file: ResultFile; linkFor?: LinkFor }) {
+export const FileResult = memo(function FileResult({ file, linkFor }: { file: ResultFile; linkFor?: LinkFor }) {
   const painted = useMemo(() => paintLines(file), [file]);
   const links = linkFor !== undefined && canLink(file) ? linkFor : undefined;
   const rows: ReactNode[] = [];
@@ -121,8 +128,16 @@ export function FileResult({ file, linkFor }: { file: ResultFile; linkFor?: Link
     if (previous !== 0 && line.line > previous + 1) {
       rows.push(<div key={`gap-${line.line}`} className="gap" aria-hidden="true" />);
     }
-    const link = links?.({ repo: file.repo, path: file.path, line: line.line });
-    rows.push(<LineView key={line.line} line={line} painted={painted[i] ?? []} link={link} />);
+    rows.push(
+      <LineView
+        key={line.line}
+        line={line}
+        painted={painted[i] ?? []}
+        repo={file.repo}
+        path={file.path}
+        linkFor={links}
+      />,
+    );
     previous = line.line;
   });
   const fileLink = links?.({ repo: file.repo, path: file.path, line: null });
@@ -141,7 +156,7 @@ export function FileResult({ file, linkFor }: { file: ResultFile; linkFor?: Link
       {rows.length > 0 && <div className="lines">{rows}</div>}
     </section>
   );
-}
+});
 
 // How many results the server counted toward the limit: matching lines,
 // or one for a file with nothing to highlight.

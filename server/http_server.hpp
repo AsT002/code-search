@@ -9,6 +9,7 @@
 
 #include "codesearch/app/repo_manager.hpp"
 #include "codesearch/repo/workspace.hpp"
+#include "codesearch/util/thread_pool.hpp"
 
 namespace codesearch {
 
@@ -24,6 +25,7 @@ struct ServerConfig {
     std::size_t maxBodyBytes = std::size_t{64} << 10U;  // 64 KiB; bigger bodies get 413
     std::size_t maxOpenIndexes = 64;                    // index files kept open between searches
     std::size_t requestThreads = 8;                     // requests answered at once
+    std::size_t searchThreads = defaultThreadCount();   // check files, for all searches
     std::size_t maxQueuedRequests = 64;                 // more waiting than this get turned away
 
     // For tests. Called on the request's thread before each result file of
@@ -32,6 +34,9 @@ struct ServerConfig {
     // For tests. Called when a search's document ends, with its status, or
     // "disconnected" if the client went away first.
     std::function<void(std::string_view status)> onSearchDone;
+    // For tests. Called on the watchdog's thread when it cancels a search
+    // because its client went away.
+    std::function<void()> onClientGone;
 };
 
 // The HTTP API and the web UI, on 127.0.0.1 only. See "HTTP API" in

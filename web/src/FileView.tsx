@@ -8,17 +8,31 @@ import type { OpenFile } from "./address";
 import { fetchFile, type ResultFile } from "./api";
 import { LineView, paintLines, type LinkFor, type LinkProps } from "./Results";
 
-function FileLines({ file, line, linkFor }: { file: ResultFile; line: number | null; linkFor: LinkFor }) {
+function FileLines({
+  file,
+  line,
+  jump,
+  linkFor,
+}: {
+  file: ResultFile;
+  line: number | null;
+  jump: boolean;
+  linkFor: LinkFor;
+}) {
   const painted = useMemo(() => paintLines(file), [file]);
 
-  // Scroll to the line once it's there, and whenever another one is picked.
+  // Scroll to the line once the file is there, and when the address picks
+  // another one. Not when it was picked by a click (jump is false).
   useEffect(() => {
+    if (!jump) {
+      return;
+    }
     if (line === null) {
       window.scrollTo(0, 0);
     } else {
       document.getElementById(`L${line}`)?.scrollIntoView({ block: "center" });
     }
-  }, [file, line]);
+  }, [file, line, jump]);
 
   if (file.lines.length === 0) {
     return <p className="muted">The file is empty.</p>;
@@ -30,7 +44,9 @@ function FileLines({ file, line, linkFor }: { file: ResultFile; line: number | n
           key={fileLine.line}
           line={fileLine}
           painted={painted[i] ?? []}
-          link={linkFor({ repo: file.repo, path: file.path, line: fileLine.line })}
+          repo={file.repo}
+          path={file.path}
+          linkFor={linkFor}
           fadeContext={false}
           selected={fileLine.line === line}
           anchor
@@ -40,7 +56,17 @@ function FileLines({ file, line, linkFor }: { file: ResultFile; line: number | n
   );
 }
 
-export function FileView({ open, linkFor, back }: { open: OpenFile; linkFor: LinkFor; back: LinkProps }) {
+export function FileView({
+  open,
+  jump,
+  linkFor,
+  back,
+}: {
+  open: OpenFile;
+  jump: boolean;
+  linkFor: LinkFor;
+  back: LinkProps;
+}) {
   const [file, setFile] = useState<ResultFile | null>(null);
   const [error, setError] = useState("");
 
@@ -73,7 +99,7 @@ export function FileView({ open, linkFor, back }: { open: OpenFile; linkFor: Lin
         </p>
       )}
       {error === "" && file === null && <p className="muted">Loading…</p>}
-      {file !== null && <FileLines file={file} line={open.line} linkFor={linkFor} />}
+      {file !== null && <FileLines file={file} line={open.line} jump={jump} linkFor={linkFor} />}
     </section>
   );
 }
