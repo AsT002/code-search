@@ -40,6 +40,16 @@ def head_of(checkout):
     return done.stdout.strip() if done.returncode == 0 else None
 
 
+def case_clashes(checkout):
+    """Lowercased paths of tracked files whose names differ only in case."""
+    names = subprocess.run(["git", "-C", str(checkout), "ls-files"], capture_output=True, text=True,
+                           check=True).stdout.splitlines()
+    seen = {}
+    for name in names:
+        seen[name.lower()] = seen.get(name.lower(), 0) + 1
+    return {name for name, count in seen.items() if count > 1}
+
+
 def clone(url, commit, dest):
     """Makes dest a checkout of commit. Checks one that's already there."""
     if dest.exists():
@@ -51,6 +61,12 @@ def clone(url, commit, dest):
         # status.showUntrackedFiles setting would hide them.
         status = subprocess.run(["git", "-C", str(dest), "status", "--porcelain", "--untracked-files=all"],
                                 capture_output=True, text=True, check=True).stdout
+        # On a disk that ignores case (macOS's default), of two tracked
+        # files whose names differ only in case (the kernel has 13 pairs,
+        # like xt_MARK.h and xt_mark.h) only one can exist, so the other
+        # shows as changed. Those are the only changes allowed.
+        clashing = case_clashes(dest)
+        status = "".join(line + "\n" for line in status.splitlines() if line[3:].lower() not in clashing)
         if status:
             sys.exit(f"{dest} has changes, so rg and git grep would search other files than "
                      f"code-search:\n{status}Undo them, or remove it to clone it again")

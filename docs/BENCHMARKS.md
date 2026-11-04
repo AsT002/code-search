@@ -1,5 +1,150 @@
 # Benchmarks
 
+## Against other indexed tools: codesearch and zoekt
+
+ripgrep has no index: it reads every file on every search, so beating it
+with an index built beforehand says little. The comparison that matters is
+with tools built the same way, and it has to include what the index costs.
+
+- Russ Cox's codesearch (`cindex` and `csearch`, v1.2.0): the trigram index
+  this project's design comes from ("Regular Expression Matching with a
+  Trigram Index", 2012). Its index holds only posting lists, and it reads
+  candidate files from disk.
+- Sourcegraph's zoekt (commit `a5a933bc`): its index holds file contents and
+  trigram positions, in shards. Searched with `zoekt-webserver`, and from the
+  command line with `benchmarks/zoekt_all`, zoekt's own CLI with its match
+  limits raised: by default zoekt stops after 100,000 matches per shard, then
+  ranks, so it doesn't return every match the way the others do.
+
+Setup: Apple M4 (10 cores), 16 GiB, macOS, release build, warm file cache,
+load average about 2. 7 runs of each command, the tools taking turns. Two
+sets of files: the Linux kernel fork ripgrep's benchsuite uses
+(BurntSushi/linux at `84e57d2922`: 79,435 tracked files, 1,244 MiB) with the
+suite's `linux_*` patterns, and googletest, brew and go at the commits in
+`benchmarks/repos.tsv` (19,866 files, 171 MiB) with the queries in
+`benchmarks/queries.tsv` all three can run. Each tool leaves out files over
+1 MB, except csearch, which has no size limit but skips files with invalid
+UTF-8, a line over 2,000 bytes or too many trigrams. zoekt's symbol index
+(ctags) is off. Made by `benchmarks/vs_indexed.py` (see "Run it yourself"
+under M7).
+
+"Fresh" is a new process for each search, printing every matching line to a
+pipe. "Warm" is a server that's already running, over HTTP: `code-search
+serve` and `zoekt-webserver` (csearch has none). A warm "page" is 200
+matching lines, as a UI asks for; zoekt finds up to its own limits, ranks,
+then shows 200. "Faster" names the faster tool by median.
+
+### Linux: build
+
+| Tool | Build | Peak memory | Index size |
+|---|---:|---:|---:|
+| code-search | 5.1 s | 2159 MiB | 1,037 MiB |
+| csearch (Cox) | 11.9 s | 1185 MiB | 150 MiB |
+| zoekt | 68.9 s | 1035 MiB | 2,486 MiB |
+
+### Three repos: build
+
+| Tool | Build | Peak memory | Index size |
+|---|---:|---:|---:|
+| code-search | 1.1 s | 307 MiB | 157 MiB |
+| csearch (Cox) | 2.9 s | 323 MiB | 28 MiB |
+| zoekt | 4.4 s | 639 MiB | 359 MiB |
+
+### Linux: search (ms, median of 7)
+
+| Benchmark | Fresh: code-search | csearch | Faster | zoekt | Faster | Warm, all: code-search | zoekt | Faster |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| linux_literal_default | 17.3 | 204 | cs 12x | 41.3 | cs 2.4x | 4.95 | 1.18 | zoekt 4.2x |
+| linux_literal_casei | 18.5 | 618 | cs 33x | 44.5 | cs 2.4x | 6.94 | 3.60 | zoekt 1.9x |
+| linux_re_literal_suffix | 114 | 289 | cs 2.5x | 219 | cs 1.9x | 99.5 | 192 | cs 1.9x |
+| linux_word | 56.2 | 204 | cs 3.6x | 41.6 | zoekt 1.4x | 57.3 | 2.09 | zoekt 27x |
+| linux_unicode_greek | 271 | 3,262 | cs 12x | 2,229 | cs 8.2x | 304 | 3,273 | cs 11x |
+| linux_unicode_greek_casei | 276 | 3,275 | cs 12x | 2,275 | cs 8.3x | 304 | 3,370 | cs 11x |
+| linux_unicode_word | 288 | 3,335 | cs 12x | 4,067 | cs 14x | 304 | 4,941 | cs 16x |
+| linux_no_literal (ASCII) | 330 | 3,336 | cs 10x | 8,157 | cs 25x | 298 | 9,000 | cs 30x |
+| linux_alternates | 84.8 | 701 | cs 8.3x | 41.8 | zoekt 2.0x | 79.1 | 1.89 | zoekt 42x |
+| linux_alternates_casei | 140 | 930 | cs 6.6x | 42.9 | zoekt 3.3x | 147 | 4.15 | zoekt 35x |
+
+### Three repos: search by group (ms, median of the queries' medians)
+
+| Group | Queries | Fresh: code-search | csearch | Faster | zoekt | Faster | Warm page: code-search | zoekt | Faster | Warm, all: code-search | zoekt | Faster |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| rare | 6 | 8.87 | 30.1 | cs 3.4x | 42.2 | cs 4.8x | 1.90 | 1.59 | zoekt 1.2x | 1.91 | 1.79 | same |
+| missing | 4 | 7.15 | 4.75 | csearch 1.5x | 35.5 | cs 5.0x | 0.77 | 0.68 | zoekt 1.1x | 0.77 | 0.68 | zoekt 1.1x |
+| common | 6 | 31.0 | 450 | cs 15x | 117 | cs 3.8x | 1.75 | 36.0 | cs 21x | 35.7 | 155 | cs 4.3x |
+| short | 6 | 69.4 | 920 | cs 13x | 628 | cs 9.1x | 1.64 | 185 | cs 113x | 98.2 | 731 | cs 7.4x |
+| case | 2 | 10.2 | 99.2 | cs 9.7x | 40.3 | cs 3.9x | 1.54 | 3.88 | cs 2.5x | 3.06 | 7.12 | cs 2.3x |
+| long | 4 | 7.47 | 14.4 | cs 1.9x | 34.6 | cs 4.6x | 0.94 | 0.39 | zoekt 2.4x | 0.91 | 0.40 | zoekt 2.3x |
+| regex | 8 | 20.6 | 78.5 | cs 3.8x | 464 | cs 23x | 2.96 | 436 | cs 147x | 13.5 | 444 | cs 33x |
+
+### Linux: peak memory while searching (fresh process)
+
+| Benchmark | code-search | csearch | zoekt |
+|---|---:|---:|---:|
+| linux_literal_default | 177 MiB | 9 MiB | 186 MiB |
+| linux_literal_casei | 178 MiB | 17 MiB | 226 MiB |
+| linux_re_literal_suffix | 415 MiB | 13 MiB | 235 MiB |
+| linux_word | 177 MiB | 9 MiB | 185 MiB |
+| linux_alternates | 299 MiB | 15 MiB | 166 MiB |
+| linux_alternates_casei | 544 MiB | 24 MiB | 172 MiB |
+
+### Linux: matching lines
+
+| Benchmark | code-search | csearch | only cs / only csearch | zoekt | only cs / only zoekt |
+|---|---:|---:|---:|---:|---:|
+| linux_literal_default | 39 | 39 | 0 / 0 | 39 | 0 / 0 |
+| linux_literal_casei | 536 | 536 | 0 / 0 | 536 | 0 / 0 |
+| linux_re_literal_suffix | 2,132 | 2,160 | 0 / 28 | 2,132 | 0 / 0 |
+| linux_word | 9 | 9 | 0 / 0 | 9 | 0 / 0 |
+| linux_unicode_greek | 105 | 105 | 0 / 0 | 105 | 0 / 0 |
+| linux_unicode_greek_casei | 245 | 245 | 0 / 0 | 245 | 0 / 0 |
+| linux_unicode_word | 247 | 247 | 0 / 0 | 247 | 0 / 0 |
+| linux_no_literal (ASCII) | 719 | 719 | 1 / 1 | 1,108 | 1 / 390 |
+| linux_alternates | 92 | 140 | 0 / 48 | 92 | 0 / 0 |
+| linux_alternates_casei | 193 | 241 | 0 / 48 | 193 | 0 / 0 |
+
+The kernel has 13 pairs of files whose names differ only in case. On
+macOS's disk, which ignores case, one of each pair exists, and that's what
+csearch and zoekt index; code-search reads both from Git. The lines only
+csearch finds come from files over 1 MB that the others leave out. The lines
+only zoekt finds come from its regexes matching across lines (its `\s` can
+match a newline); code-search and csearch match within a line, like grep.
+
+### What it shows
+
+- Building: code-search builds its index fastest (2.3x faster than
+  csearch and 13x faster than zoekt on the kernel), and its index is 6 to 7x
+  the size of csearch's and 0.4x zoekt's. Peak memory while building the
+  kernel's index is the highest of the three (2.2 GiB).
+- Against csearch, both started fresh: code-search is faster on every kernel
+  benchmark (2.5x to 33x) and on every group of the other set but one,
+  because it reads the contents of candidate files from its mapped index on
+  8 threads, where csearch opens each file from disk on one. csearch is
+  faster on words that aren't there (4.8 ms against 7.2 ms): with nothing to
+  read, the cost is starting the program, and csearch's is lower. csearch
+  uses far less memory while searching (9 to 24 MiB against 13 to 544 MiB),
+  since it holds no contents.
+- Against zoekt, both warm: zoekt is faster on plain text with few matches
+  and on regexes made of plain words (`PM_RESUME` 1.2 ms against 5.0, `\bPM_RESUME\b`
+  2.1 ms against 57, the 4-word alternation 1.9 ms against 79): its index
+  keeps where each trigram is, so it confirms a match without scanning the
+  file, where code-search runs RE2 over each candidate. code-search is faster
+  on other regexes (1.9x to 30x on the kernel, 33x on the other set's median)
+  and on pages of common words (21x to 113x), because it stops after 200
+  lines where zoekt collects matches up to its limits and ranks them first.
+- Started fresh, zoekt takes about 35 ms before searching, loading its
+  shards; it's built to run as a server.
+
+So the trade-off: code-search builds fastest and searches regexes fastest,
+for an index 6 to 7x the size of codesearch's; zoekt answers literal searches
+fastest, for an index 2.4x the size of code-search's and a build 13x longer.
+The search method is Cox's: a trigram index and RE2. What's different is
+around it: file contents in the index, a parallel search that keeps results
+in order, a query language, commit snapshots that updates swap in while
+searches run, and an index that's checked as untrusted. These numbers are
+from macOS, where opening files costs more than on Linux, which favors the
+two tools that keep contents in their index.
+
 ## After M9: output and regex threads
 
 Profiled with `sample` on an Apple M4 (10 cores), release build, warm file
@@ -163,6 +308,14 @@ Run it yourself:
 cmake --preset release && cmake --build --preset release
 python3 benchmarks/run_benchmarks.py <work dir> --code-search build/release/code-search
 ./build/release/benchmarks/search_bench <work dir>/ws benchmarks/queries.tsv --threads 8
+```
+
+To compare with other indexed tools (see "Against other indexed tools"
+above), `benchmarks/vs_indexed.py` uses the same work dir and needs Go: its
+docstring says how to build csearch, zoekt and `benchmarks/zoekt_all`.
+
+```sh
+python3 benchmarks/vs_indexed.py <work dir> --code-search build/release/code-search --go-bin <dir>
 ```
 
 For a fuller comparison with ripgrep, `benchmarks/vs_ripgrep.py` uses the
