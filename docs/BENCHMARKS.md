@@ -165,6 +165,19 @@ python3 benchmarks/run_benchmarks.py <work dir> --code-search build/release/code
 ./build/release/benchmarks/search_bench <work dir>/ws benchmarks/queries.tsv --threads 8
 ```
 
+For a fuller comparison with ripgrep, `benchmarks/vs_ripgrep.py` uses the
+same work dir. It checks that both tools find the same lines, times all
+results, files only and the first 10 lines, and compares repo sizes, a
+running server, peak memory and what the index costs. It also runs
+ripgrep's own benchsuite patterns (the 11 `linux_*` ones) on the Linux kernel
+fork that suite uses, which it clones (about 1.5 GB). `--no-linux` skips
+that part. Run it on a quiet machine: it prints the load average, and above a
+few the times are higher for both tools.
+
+```sh
+python3 benchmarks/vs_ripgrep.py <work dir> --code-search build/release/code-search
+```
+
 ### Where the time went
 
 The M6 code spent under 0.3 ms finding candidates for every query, even the
